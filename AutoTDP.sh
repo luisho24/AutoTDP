@@ -125,7 +125,7 @@ Restart=on-failure
 User=root
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=multi-user.target sleep.target
 EOF
 
     sudo systemctl daemon-reload
