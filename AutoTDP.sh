@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # Configuration
-CONFIG_DIR="$HOME/.config/AutoTDP"
+CONFIG_DIR="/etc/AutoTDP"  # Shared configuration directory
 CONFIG_FILE="$CONFIG_DIR/AutoTDP.config"
 LOG_DIR="$CONFIG_DIR/logs"
-LOG_FILE="$LOG_DIR/tdp_manager.log"
+LOG_FILE="$LOG_DIR/tdp_manager_$(date +'%Y-%m-%d_%H-%M-%S').log"  # New log file per run
 REQUIRED_PACKAGES=("bc" "gawk" "sudo" "ryzenadj")
 
 # Global variables
@@ -17,6 +17,7 @@ RYZENADJ_EXEC=ryzenadj
 RYZENADJ_DELAY=4  # Delay in seconds between adjustments
 
 SERVICE_FILE="/etc/systemd/system/autotdp.service"
+SCRIPT_DEST="/usr/local/bin/autotdp.sh"  # Destination for the script copy
 
 # Function to log messages to console and log file
 log() {
@@ -109,13 +110,17 @@ cleanup() {
 
 # Function to install the script as a systemd service
 install_service() {
+    # Copy the script to the destination directory
+    cp $(realpath $0) $SCRIPT_DEST
+    chmod +x $SCRIPT_DEST
+
     sudo tee $SERVICE_FILE > /dev/null <<EOF
 [Unit]
 Description=AutoTDP Service
 After=network.target
 
 [Service]
-ExecStart=$(realpath $0)
+ExecStart=$SCRIPT_DEST
 Restart=on-failure
 User=root
 
@@ -142,6 +147,10 @@ fi
 mkdir -p $CONFIG_DIR
 mkdir -p $LOG_DIR
 
+# Set permissions to make config and log directories accessible to all users
+chmod 777 $CONFIG_DIR
+chmod 777 $LOG_DIR
+
 # Create config file if it doesn't exist
 if [ ! -f $CONFIG_FILE ]; then
     echo "Creating configuration file at $CONFIG_FILE"
@@ -151,6 +160,7 @@ if [ ! -f $CONFIG_FILE ]; then
     echo "STEP_TDP=$STEP_TDP" >> $CONFIG_FILE
     echo "RYZENADJ_EXEC=$RYZENADJ_EXEC" >> $CONFIG_FILE
     echo "RYZENADJ_DELAY=$RYZENADJ_DELAY" >> $CONFIG_FILE
+    chmod 666 $CONFIG_FILE  # Make the config file editable by any user
 fi
 
 # Load configuration
