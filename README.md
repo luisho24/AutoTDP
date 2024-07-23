@@ -32,11 +32,11 @@ STEP_TDP=1000
 RYZENADJ_EXEC=ryzenadj
 RYZENADJ_DELAY=4
 ```
-A config file with the default values will be located at `~./config/AutoTDP/AutoTDP.config`
+A config file with the default values will be located at `/etc/AutoTDP/AutoTDP.config`
 
 ## Systemd Service Installation:
 
-To run the script as a systemd service simply execute it with the `--install` argument
+To run the script as a systemd service simply execute it with the `--install` argument. This will create a copy of the script in `/usr/local/bin/autotdp.sh` so the downloaded script can be deleted safely and will ensure the service will have access to the script.
 
 ```code
 sudo ./AutoTDP.sh --install
@@ -50,7 +50,7 @@ sudo systemctl status autotdp.service
 
 ## Logs
 
-Log files are stored in ~/.config/AutoTDP/logs/. The main log file is tdp_manager.log.
+Log files are stored in /etc/AutoTDP/logs/
 
 ## Contributing
 
