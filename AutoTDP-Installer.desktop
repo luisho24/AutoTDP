@@ -1,0 +1,18 @@
+[Desktop Entry]
+Categories=Utility;
+Comment=Download and Install AutoTDP Script
+Comment=Download and Install AutoTDP Script
+Exec=sh -c 'wget -O /tmp/AutoTDP.sh https://github.com/luisho24/AutoTDP/raw/63098a8ccfc8fa35ec8843c720cb211c91758646/AutoTDP.sh && chmod +x /tmp/AutoTDP.sh && sudo /tmp/AutoTDP.sh --install'
+GenericName=
+GenericName=
+Icon=run-install
+MimeType=
+Name=AutoTDP Installer
+Name=AutoTDP Installer
+Path=
+StartupNotify=true
+Terminal=true
+TerminalOptions=
+Type=Application
+X-KDE-SubstituteUID=false
+X-KDE-Username=
