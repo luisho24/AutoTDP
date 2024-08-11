@@ -46,7 +46,7 @@ check_packages() {
 # Function to set TDP values
 set_tdp() {
     local value=$1
-    if sudo $RYZENADJ_EXEC --stapm-limit $value --fast-limit $value --slow-limit $value; then
+    if echo $password | sudo -S $RYZENADJ_EXEC --stapm-limit $value --fast-limit $value --slow-limit $value; then
         log "TDP set to $value"
     else
         log "Failed to set TDP to $value"
@@ -125,7 +125,7 @@ Restart=on-failure
 User=root
 
 [Install]
-WantedBy=multi-user.target sleep.target
+WantedBy=multi-user.target suspend.target hibernate.target
 EOF
 
     sudo systemctl daemon-reload
@@ -139,8 +139,10 @@ EOF
 
 # Check if running as root
 if [[ $EUID -ne 0 ]]; then
-    echo "This script must be run as root."
-    exit 1
+    password=$(zenity --password --title="Authentication Required")
+    echo $password | sudo -S echo "Root access granted."
+else
+    password=""
 fi
 
 # Create configuration and log directories if they don't exist
