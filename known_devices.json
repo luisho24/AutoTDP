@@ -18,6 +18,106 @@
         "BATTERY_MAX_TDP": 15000
       }
     },
+    "generic_amd_laptop_u": {
+      "display_name": "Generic AMD Laptop U-Series",
+      "manufacturer": "Generic",
+      "aliases": [
+        "generic_laptop_u",
+        "amd_laptop_u"
+      ],
+      "supported": true,
+      "notes": "Conservative profile for Ryzen U-series laptops where battery life matters more than sustained peak power.",
+      "config": {
+        "MIN_TDP": 5000,
+        "DEFAULT_TDP": 12000,
+        "MAX_CPU_TDP": 25000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 5,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 15000
+      }
+    },
+    "generic_amd_laptop_hs": {
+      "display_name": "Generic AMD Laptop HS-Series",
+      "manufacturer": "Generic",
+      "aliases": [
+        "generic_laptop_hs",
+        "amd_laptop_hs"
+      ],
+      "supported": true,
+      "notes": "Balanced profile for thin gaming and creator laptops with Ryzen HS processors.",
+      "config": {
+        "MIN_TDP": 8000,
+        "DEFAULT_TDP": 18000,
+        "MAX_CPU_TDP": 35000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 4,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 22000
+      }
+    },
+    "generic_amd_laptop_hx": {
+      "display_name": "Generic AMD Laptop HX-Series",
+      "manufacturer": "Generic",
+      "aliases": [
+        "generic_laptop_hx",
+        "amd_laptop_hx"
+      ],
+      "supported": true,
+      "notes": "High-performance profile for larger AMD laptops with stronger cooling and power delivery.",
+      "config": {
+        "MIN_TDP": 10000,
+        "DEFAULT_TDP": 22000,
+        "MAX_CPU_TDP": 45000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 4,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 25000
+      }
+    },
+    "framework_13_7840u": {
+      "display_name": "Framework Laptop 13 7840U",
+      "manufacturer": "Framework",
+      "aliases": [
+        "framework13",
+        "framework_7840u"
+      ],
+      "supported": true,
+      "notes": "Portable Ryzen 7040U laptop profile for balanced thermals and battery life.",
+      "config": {
+        "MIN_TDP": 5000,
+        "DEFAULT_TDP": 12000,
+        "MAX_CPU_TDP": 28000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 5,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 16000
+      }
+    },
+    "zephyrus_g14_7940hs": {
+      "display_name": "ASUS ROG Zephyrus G14 7940HS",
+      "manufacturer": "ASUS",
+      "aliases": [
+        "g14_7940hs",
+        "zephyrus_g14"
+      ],
+      "supported": true,
+      "notes": "Gaming laptop profile for Ryzen 7940HS systems with more thermal headroom than handhelds.",
+      "config": {
+        "MIN_TDP": 8000,
+        "DEFAULT_TDP": 20000,
+        "MAX_CPU_TDP": 35000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 4,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 22000
+      }
+    },
     "steam_deck": {
       "display_name": "Steam Deck / Steam Deck OLED",
       "manufacturer": "Valve",

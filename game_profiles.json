@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "description": "Game-specific tuning rules. Priority is Steam AppID, then executable name, then launcher type.",
+  "steam_appids": {
+    "1091500": {
+      "profile": "cyberpunk_2077"
+    },
+    "1145360": {
+      "profile": "hades"
+    },
+    "1245620": {
+      "profile": "elden_ring"
+    },
+    "1086940": {
+      "profile": "baldurs_gate_3"
+    }
+  },
+  "executables": {
+    "cyberpunk2077.exe": {
+      "profile": "cyberpunk_2077"
+    },
+    "hades.exe": {
+      "profile": "hades"
+    },
+    "eldenring.exe": {
+      "profile": "elden_ring"
+    },
+    "bg3.exe": {
+      "profile": "baldurs_gate_3"
+    }
+  },
+  "launcher_types": {
+    "steam": {
+      "profile": "generic_steam_game"
+    },
+    "wine": {
+      "profile": "generic_wine_game"
+    }
+  },
+  "profiles": {
+    "generic_steam_game": {
+      "display_name": "Generic Steam Game",
+      "config": {
+        "PERFORMANCE_MODE": "performance"
+      }
+    },
+    "generic_wine_game": {
+      "display_name": "Generic Wine/Proton Game",
+      "config": {
+        "PERFORMANCE_MODE": "performance",
+        "RYZENADJ_DELAY": 3,
+        "MONITOR_INTERVAL": 3,
+        "STABLE_SAMPLE_COUNT": 1
+      }
+    },
+    "cyberpunk_2077": {
+      "display_name": "Cyberpunk 2077",
+      "config": {
+        "PERFORMANCE_MODE": "turbo",
+        "DEFAULT_TDP": 18000,
+        "BATTERY_MAX_TDP": 20000,
+        "MONITOR_INTERVAL": 3,
+        "STABLE_SAMPLE_COUNT": 1
+      }
+    },
+    "elden_ring": {
+      "display_name": "Elden Ring",
+      "config": {
+        "PERFORMANCE_MODE": "turbo",
+        "DEFAULT_TDP": 17000,
+        "BATTERY_MAX_TDP": 18000,
+        "MONITOR_INTERVAL": 3,
+        "STABLE_SAMPLE_COUNT": 1
+      }
+    },
+    "baldurs_gate_3": {
+      "display_name": "Baldur's Gate 3",
+      "config": {
+        "PERFORMANCE_MODE": "performance",
+        "DEFAULT_TDP": 16000,
+        "BATTERY_MAX_TDP": 17000,
+        "MONITOR_INTERVAL": 3,
+        "STABLE_SAMPLE_COUNT": 1
+      }
+    },
+    "hades": {
+      "display_name": "Hades",
+      "config": {
+        "PERFORMANCE_MODE": "battery",
+        "DEFAULT_TDP": 10000,
+        "BATTERY_MAX_TDP": 12000,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2
+      }
+    }
+  }
+}

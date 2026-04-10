@@ -1,6 +1,6 @@
 # AutoTDP
 
-AutoTDP is a Bash script that adjusts AMD APU TDP dynamically with `ryzenadj`. It is designed for Linux handheld PCs and uses real CPU utilization instead of raw load average, which gives more stable behavior on devices like Steam Deck, ROG Ally and Legion Go.
+AutoTDP is a Bash script that adjusts AMD APU TDP dynamically with `ryzenadj`. It is designed for Linux handheld PCs and AMD laptops, and uses real CPU utilization instead of raw load average, which gives more stable behavior on devices like Steam Deck, ROG Ally, Legion Go, Framework laptops and other Ryzen-based systems.
 
 ## Features
 
@@ -8,6 +8,9 @@ AutoTDP is a Bash script that adjusts AMD APU TDP dynamically with `ryzenadj`. I
 - Reduces TDP oscillation with a stable-sample requirement before applying changes
 - Supports an optional battery cap for handheld-friendly behavior away from the charger
 - Loads device-specific presets from `known_devices.json`
+- Includes presets for AMD handhelds and AMD laptops
+- Supports selectable performance modes from the command line
+- Supports game-aware tuning with Steam AppID, executable and Wine/Proton fallback detection
 - Supports custom profile JSON files for user-defined tuning
 - Keeps configuration in `/etc/AutoTDP/AutoTDP.config`
 - Logs all actions to `/etc/AutoTDP/logs/`
@@ -21,7 +24,7 @@ The runtime logic is distro-agnostic and relies on standard Linux interfaces:
 - `/sys/class/power_supply` for charger detection
 - `ryzenadj` for AMD APU power control
 
-That means the script can run on CachyOS, SteamOS, Bazzite, Nobara, Arch, Fedora-based handheld images, or most other Linux distributions, as long as the required tools are installed.
+That means the script can run on CachyOS, SteamOS, Bazzite, Nobara, Arch, Fedora-based handheld images, Ubuntu-based laptop installs, or most other Linux distributions, as long as the required tools are installed.
 
 `systemd` is only required if you want to use `--install`. Running the script directly does not depend on a specific distro.
 
@@ -50,6 +53,8 @@ STABLE_SAMPLE_COUNT=2
 BATTERY_MAX_TDP=18000
 DEVICE_PROFILE=generic
 DEVICE_PROFILE_FILE=/etc/AutoTDP/known_devices.json
+PERFORMANCE_MODE=balanced
+GAME_PROFILE_FILE=/etc/AutoTDP/game_profiles.json
 ```
 
 Config meanings:
@@ -60,11 +65,18 @@ Config meanings:
 - `BATTERY_MAX_TDP`: max TDP when no external power is detected
 - `DEVICE_PROFILE`: selected profile key or alias from the JSON file
 - `DEVICE_PROFILE_FILE`: JSON file to read profiles from
+- `PERFORMANCE_MODE`: selected runtime tuning mode
+- `GAME_PROFILE_FILE`: JSON file with per-game tuning rules
 
 ## Known Device Profiles
 
 The repo includes `known_devices.json` with presets for popular handheld PCs, including:
 
+- `generic_amd_laptop_u`
+- `generic_amd_laptop_hs`
+- `generic_amd_laptop_hx`
+- `framework_13_7840u`
+- `zephyrus_g14_7940hs`
 - `steam_deck`
 - `rog_ally_z1_extreme`
 - `rog_ally_z1`
@@ -78,6 +90,136 @@ The repo includes `known_devices.json` with presets for popular handheld PCs, in
 There is also an `msi_claw_a1m` entry marked as unsupported because it uses Intel hardware and `ryzenadj` is for AMD APUs.
 
 These presets are conservative starting points, not hard guarantees. Handheld firmware, BIOS limits, cooling and vendor EC behavior vary.
+
+For laptops, the generic presets are intended as category-level defaults:
+
+- `generic_amd_laptop_u`: ultrabooks and thin-and-light Ryzen U systems
+- `generic_amd_laptop_hs`: balanced gaming and creator laptops with Ryzen HS chips
+- `generic_amd_laptop_hx`: larger high-performance Ryzen laptops with more cooling headroom
+
+## Performance Modes
+
+AutoTDP supports runtime modes that change how aggressively it ramps TDP:
+
+- `silent`: lowest ceiling and slowest response, aimed at quiet operation
+- `battery`: conservative mode for unplugged use
+- `balanced`: default behavior
+- `performance`: faster ramp-up and higher sustained targets
+- `turbo`: most aggressive mode, best used while plugged in
+
+Mode commands:
+
+```bash
+./AutoTDP.sh --list-modes
+./AutoTDP.sh --mode performance
+sudo ./AutoTDP.sh --set-mode battery
+```
+
+`--mode` applies only to the current run. `--set-mode` writes the mode to `/etc/AutoTDP/AutoTDP.config` and restarts the service automatically if it is already running.
+
+You can also override individual settings for a single run:
+
+```bash
+./AutoTDP.sh --profile generic_amd_laptop_hs --mode performance --override BATTERY_MAX_TDP=18000 --override MONITOR_INTERVAL=3
+```
+
+Supported override keys are:
+
+- `MIN_TDP`
+- `DEFAULT_TDP`
+- `MAX_CPU_TDP`
+- `STEP_TDP`
+- `RYZENADJ_EXEC`
+- `RYZENADJ_DELAY`
+- `MONITOR_INTERVAL`
+- `STABLE_SAMPLE_COUNT`
+- `BATTERY_MAX_TDP`
+- `DEVICE_PROFILE`
+- `DEVICE_PROFILE_FILE`
+- `PERFORMANCE_MODE`
+- `GAME_PROFILE_FILE`
+
+Profile commands:
+
+```bash
+./AutoTDP.sh --list-profiles
+./AutoTDP.sh --profile rog_ally_z1_extreme --mode turbo
+sudo ./AutoTDP.sh --set-profile generic_amd_laptop_hs
+```
+
+`--profile` is temporary for that run. `--set-profile` persists the selected profile to the config file.
+
+## Steam Launch Parameters
+
+AutoTDP can wrap a game command directly. Everything after `--` is treated as the game command, so this works well with Steam `%command%` launch options.
+
+Example Steam launch options:
+
+```bash
+/usr/local/bin/autotdp.sh --profile rog_ally_z1_extreme --mode turbo -- %command%
+```
+
+With custom overrides:
+
+```bash
+/usr/local/bin/autotdp.sh --profile steam_deck --mode performance --override BATTERY_MAX_TDP=14000 --override MONITOR_INTERVAL=3 -- %command%
+```
+
+For an AMD laptop profile:
+
+```bash
+/usr/local/bin/autotdp.sh --profile generic_amd_laptop_hs --mode performance --override DEFAULT_TDP=22000 -- %command%
+```
+
+Behavior in Steam wrapper mode:
+
+- AutoTDP starts monitoring in the background
+- launches the game command passed by Steam
+- keeps the chosen profile, mode and overrides active while the game runs
+- restores the mode default TDP when the game exits
+
+## Game Detection And Priority
+
+AutoTDP now supports game-aware overrides through `game_profiles.json`.
+
+Detection sources, from strongest to weakest:
+
+1. Steam AppID from environment variables such as `SteamAppId`, `SteamGameId`, or `STEAM_COMPAT_APP_ID`
+2. Executable name detection from the wrapped command or running process command line
+3. Launcher type fallback such as `steam` or `wine`
+
+Configuration priority, from strongest to weakest:
+
+1. CLI `--override KEY=VALUE`
+2. CLI `--mode` and `--profile`
+3. Detected game profile from `game_profiles.json`
+4. Persisted config values from `/etc/AutoTDP/AutoTDP.config`
+5. Device profile defaults from `known_devices.json`
+6. Built-in script defaults
+
+This means contradictions are resolved deterministically. Example:
+
+- if the detected Steam AppID says `turbo`, but launch options include `--mode battery`, the explicit CLI mode wins
+- if a game profile changes `DEFAULT_TDP`, but launch options include `--override DEFAULT_TDP=14000`, the override wins
+- if no exact game match exists, AutoTDP falls back to executable matching, then launcher matching, then the base profile
+
+Included game profile examples:
+
+- Steam AppID `1091500` for Cyberpunk 2077
+- Steam AppID `1245620` for Elden Ring
+- Steam AppID `1086940` for Baldur's Gate 3
+- Steam AppID `1145360` for Hades
+
+The bundled `game_profiles.json` also includes generic fallbacks for Steam-native and Wine/Proton-launched games.
+
+Alternative detection methods considered:
+
+- `SteamAppId`, `SteamGameId`, `STEAM_COMPAT_APP_ID`: best signal when launching from Steam or Proton
+- `/proc/<pid>/cmdline`: useful to identify `.exe` names under Wine/Proton or native executables
+- `/proc/<pid>/comm`: useful for weaker fallback classification like `wine`, `wine64-preloader`, `wineserver`, `steam`
+- Wine process existence alone: useful as a last-resort hint that a Windows game is probably running, but not reliable enough for exact title detection
+
+Steam AppID is the preferred exact-match signal whenever available.
 
 ## Custom JSON Profiles
 
@@ -110,6 +252,8 @@ Then set:
 ```ini
 DEVICE_PROFILE=my_handheld
 DEVICE_PROFILE_FILE=/path/to/my_profiles.json
+PERFORMANCE_MODE=balanced
+GAME_PROFILE_FILE=/path/to/my_game_profiles.json
 ```
 
 ## Service Installation
@@ -133,6 +277,7 @@ Log files are stored in `/etc/AutoTDP/logs/`.
 ## Notes
 
 - AutoTDP currently targets AMD handhelds that work with `ryzenadj`.
+- AutoTDP now also supports AMD laptops through generic and device-specific presets.
 - Device presets are intended to be editable and extended over time.
 - If your handheld has unusual firmware behavior, create a custom JSON profile instead of editing the script.
 
