@@ -1,0 +1,210 @@
+{
+  "version": 1,
+  "description": "Known handheld PC profiles for AutoTDP. Values are conservative starting points and can be overridden with a custom JSON file.",
+  "profiles": {
+    "generic": {
+      "display_name": "Generic AMD Handheld",
+      "manufacturer": "Generic",
+      "supported": true,
+      "notes": "Balanced fallback profile for AMD handheld PCs supported by ryzenadj.",
+      "config": {
+        "MIN_TDP": 5000,
+        "DEFAULT_TDP": 10000,
+        "MAX_CPU_TDP": 18000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 4,
+        "MONITOR_INTERVAL": 5,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 15000
+      }
+    },
+    "steam_deck": {
+      "display_name": "Steam Deck / Steam Deck OLED",
+      "manufacturer": "Valve",
+      "aliases": [
+        "steamdeck",
+        "steam_deck_oled"
+      ],
+      "supported": true,
+      "notes": "Steam Deck APU power target is typically 4-15W.",
+      "config": {
+        "MIN_TDP": 4000,
+        "DEFAULT_TDP": 9000,
+        "MAX_CPU_TDP": 15000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 5,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 12000
+      }
+    },
+    "rog_ally_z1_extreme": {
+      "display_name": "ROG Ally Z1 Extreme",
+      "manufacturer": "ASUS",
+      "aliases": [
+        "ally_z1e",
+        "rog_ally_z1e",
+        "rogallyz1extreme"
+      ],
+      "supported": true,
+      "notes": "Higher ceiling profile for Ryzen Z1 Extreme handhelds.",
+      "config": {
+        "MIN_TDP": 8000,
+        "DEFAULT_TDP": 15000,
+        "MAX_CPU_TDP": 30000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 4,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 22000
+      }
+    },
+    "rog_ally_z1": {
+      "display_name": "ROG Ally Z1",
+      "manufacturer": "ASUS",
+      "aliases": [
+        "ally_z1",
+        "rog_ally_z1"
+      ],
+      "supported": true,
+      "notes": "Slightly lower ceiling than the Z1 Extreme model.",
+      "config": {
+        "MIN_TDP": 7000,
+        "DEFAULT_TDP": 12000,
+        "MAX_CPU_TDP": 20000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 4,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 16000
+      }
+    },
+    "legion_go_z1_extreme": {
+      "display_name": "Lenovo Legion Go Z1 Extreme",
+      "manufacturer": "Lenovo",
+      "aliases": [
+        "legion_go",
+        "legion_go_z1e"
+      ],
+      "supported": true,
+      "notes": "Targets the larger Legion Go chassis and battery while keeping battery mode under control.",
+      "config": {
+        "MIN_TDP": 8000,
+        "DEFAULT_TDP": 15000,
+        "MAX_CPU_TDP": 30000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 4,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 20000
+      }
+    },
+    "legion_go_z1": {
+      "display_name": "Lenovo Legion Go Z1",
+      "manufacturer": "Lenovo",
+      "aliases": [
+        "legion_go_z1"
+      ],
+      "supported": true,
+      "config": {
+        "MIN_TDP": 7000,
+        "DEFAULT_TDP": 12000,
+        "MAX_CPU_TDP": 20000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 4,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 16000
+      }
+    },
+    "gpd_win_4_7840u": {
+      "display_name": "GPD Win 4 7840U / 8840U",
+      "manufacturer": "GPD",
+      "aliases": [
+        "gpd_win4",
+        "gpd_win_4",
+        "gpd_win_4_8840u"
+      ],
+      "supported": true,
+      "notes": "Compact chassis profile for Phoenix and Hawk Point GPD Win 4 variants.",
+      "config": {
+        "MIN_TDP": 6000,
+        "DEFAULT_TDP": 12000,
+        "MAX_CPU_TDP": 28000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 4,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 18000
+      }
+    },
+    "gpd_win_mini_7840u": {
+      "display_name": "GPD Win Mini 7840U / 8840U",
+      "manufacturer": "GPD",
+      "aliases": [
+        "gpd_win_mini",
+        "gpd_win_mini_8840u"
+      ],
+      "supported": true,
+      "config": {
+        "MIN_TDP": 6000,
+        "DEFAULT_TDP": 12000,
+        "MAX_CPU_TDP": 28000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 4,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 18000
+      }
+    },
+    "ayaneo_2s_7840u": {
+      "display_name": "AYANEO 2S 7840U",
+      "manufacturer": "AYANEO",
+      "aliases": [
+        "ayaneo_2s",
+        "ayaneo2s"
+      ],
+      "supported": true,
+      "config": {
+        "MIN_TDP": 6000,
+        "DEFAULT_TDP": 12000,
+        "MAX_CPU_TDP": 28000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 4,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 18000
+      }
+    },
+    "onexplayer_2_7840u": {
+      "display_name": "OneXPlayer 2 7840U",
+      "manufacturer": "One-Netbook",
+      "aliases": [
+        "onexplayer2",
+        "oxp2_7840u"
+      ],
+      "supported": true,
+      "config": {
+        "MIN_TDP": 6000,
+        "DEFAULT_TDP": 12000,
+        "MAX_CPU_TDP": 28000,
+        "STEP_TDP": 1000,
+        "RYZENADJ_DELAY": 4,
+        "MONITOR_INTERVAL": 4,
+        "STABLE_SAMPLE_COUNT": 2,
+        "BATTERY_MAX_TDP": 18000
+      }
+    },
+    "msi_claw_a1m": {
+      "display_name": "MSI Claw A1M",
+      "manufacturer": "MSI",
+      "aliases": [
+        "msi_claw",
+        "claw_a1m"
+      ],
+      "supported": false,
+      "unsupported_reason": "MSI Claw uses Intel Core Ultra hardware. AutoTDP currently targets AMD APUs controlled through ryzenadj.",
+      "config": {}
+    }
+  }
+}
