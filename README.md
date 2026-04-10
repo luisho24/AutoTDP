@@ -37,6 +37,10 @@ Install these commands on your system:
 - `sudo`
 - `ryzenadj`
 
+## Changelog
+
+Release notes are tracked in `CHANGELOG.md` so future GitHub releases can reuse the same version history.
+
 ## Default Config
 
 Default config file path: `/etc/AutoTDP/AutoTDP.config`
