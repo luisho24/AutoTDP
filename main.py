@@ -30,6 +30,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 PERFORMANCE_MODES: Tuple[str, ...] = ("silent", "battery", "balanced", "performance", "turbo")
+RYZENADJ_SOURCES: Tuple[str, ...] = ("auto", "system", "bundled", "downloaded")
 PROFILE_OVERRIDE_KEYS: Tuple[str, ...] = (
     "DEFAULT_TDP",
     "BATTERY_MAX_TDP",
@@ -55,6 +56,8 @@ PLUGIN_DEFAULTS: Dict[str, Any] = {
     "steamdb_cache": {},
     "hhd_auto_disabled_tdp": False,
     "hhd_previous_tdp_enabled": None,
+    "ryzenadj_source": "auto",
+    "ryzenadj_download_url": "https://raw.githubusercontent.com/luisho24/AutoTDP/feature/decky-plugin/bin/ryzenadj",
 }
 
 
@@ -73,6 +76,8 @@ class Plugin:
         self.settings_path = os.path.join(self.settings_dir, "autotdp_settings.json")
         self.device_profiles_path = os.path.join(self.plugin_dir, "known_devices.json")
         self.game_profiles_path = os.path.join(self.plugin_dir, "game_profiles.json")
+        self.bundled_ryzenadj_path = os.path.join(self.plugin_dir, "bin", "ryzenadj")
+        self.downloaded_ryzenadj_path = os.path.join(self.runtime_dir, "bin", "ryzenadj")
 
         self.settings: Dict[str, Any] = {}
         self.device_profiles: Dict[str, Any] = {}
@@ -87,6 +92,7 @@ class Plugin:
             "resolved_config": copy.deepcopy(DEFAULT_CONFIG),
             "battery": {},
             "hhd": {},
+            "ryzenadj": {},
         }
         self._candidate_tdp: Optional[int] = None
         self._stable_samples = 0
@@ -239,6 +245,19 @@ class Plugin:
             self.settings["hhd_auto_disabled_tdp"] = True
             self.settings["hhd_previous_tdp_enabled"] = True
         self._save_settings()
+        self._refresh_state()
+        return self._compose_state()
+
+    async def set_ryzenadj_source(self, source: str) -> Dict[str, Any]:
+        if source not in RYZENADJ_SOURCES:
+            raise ValueError(f"Unknown ryzenadj source: {source}")
+        self.settings["ryzenadj_source"] = source
+        self._save_settings()
+        self._refresh_state()
+        return self._compose_state()
+
+    async def download_ryzenadj(self) -> Dict[str, Any]:
+        await asyncio.to_thread(self._download_precompiled_ryzenadj)
         self._refresh_state()
         return self._compose_state()
 
@@ -612,9 +631,71 @@ class Plugin:
     def _command_exists(self, command: str) -> bool:
         return shutil.which(command) is not None
 
+    def _is_executable_file(self, path: str) -> bool:
+        return bool(path) and os.path.isfile(path) and os.access(path, os.X_OK)
+
+    def _resolve_ryzenadj_binary(self) -> Dict[str, Any]:
+        system_path = shutil.which("ryzenadj")
+        bundled_path = self.bundled_ryzenadj_path if self._is_executable_file(self.bundled_ryzenadj_path) else None
+        downloaded_path = self.downloaded_ryzenadj_path if self._is_executable_file(self.downloaded_ryzenadj_path) else None
+        selected_source = str(self.settings.get("ryzenadj_source", "auto"))
+
+        path = None
+        active_source = None
+
+        if selected_source == "system":
+            path = system_path
+            active_source = "system" if path else None
+        elif selected_source == "bundled":
+            path = bundled_path
+            active_source = "bundled" if path else None
+        elif selected_source == "downloaded":
+            path = downloaded_path
+            active_source = "downloaded" if path else None
+        else:
+            if system_path:
+                path = system_path
+                active_source = "system"
+            elif bundled_path:
+                path = bundled_path
+                active_source = "bundled"
+            elif downloaded_path:
+                path = downloaded_path
+                active_source = "downloaded"
+
+        return {
+            "selected_source": selected_source,
+            "active_source": active_source,
+            "resolved_path": path,
+            "system_path": system_path,
+            "bundled_path": bundled_path,
+            "downloaded_path": downloaded_path,
+            "system_available": system_path is not None,
+            "bundled_available": bundled_path is not None,
+            "downloaded_available": downloaded_path is not None,
+            "download_url": self.settings.get("ryzenadj_download_url"),
+            "sources": list(RYZENADJ_SOURCES),
+        }
+
+    def _download_precompiled_ryzenadj(self) -> None:
+        url = str(self.settings.get("ryzenadj_download_url", "")).strip()
+        if not url:
+            raise ValueError("No ryzenadj download URL configured")
+
+        os.makedirs(os.path.dirname(self.downloaded_ryzenadj_path), exist_ok=True)
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 AutoTDP-Decky/1.2.0"},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = response.read()
+        with open(self.downloaded_ryzenadj_path, "wb") as handle:
+            handle.write(data)
+        os.chmod(self.downloaded_ryzenadj_path, 0o755)
+
     def _set_tdp_sync(self, value: int) -> None:
-        command = str(self.current_state.get("resolved_config", {}).get("RYZENADJ_EXEC", DEFAULT_CONFIG["RYZENADJ_EXEC"]))
-        if not self._command_exists(command):
+        command = self.current_state.get("ryzenadj", {}).get("resolved_path")
+        if not command:
             decky.logger.warning("ryzenadj not found, skipping TDP update")
             return
         try:
@@ -914,6 +995,7 @@ class Plugin:
         self.current_state["active_device_profile"] = config.get("DEVICE_PROFILE")
         self.current_state["resolved_config"] = config
         self.current_state["hhd"] = self._get_hhd_state()
+        self.current_state["ryzenadj"] = self._resolve_ryzenadj_binary()
         self.current_state["external_power"] = self._is_on_external_power()
 
     async def _monitor_loop(self) -> None:

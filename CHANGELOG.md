@@ -2,6 +2,17 @@
 
 All notable changes to this project should be documented in this file.
 
+## v1.2.1 - 2026-04-19
+
+RyzenAdj packaging and source-selection update.
+
+Highlights:
+
+- Bundled Linux `ryzenadj` binary under plugin `bin/`
+- Added source selection for `ryzenadj`: `auto`, `system`, `bundled`, `downloaded`
+- `auto` prefers installed system `ryzenadj`, then bundled plugin binary, then downloaded fallback
+- Added Decky UI controls to inspect active `ryzenadj` source and download fallback binary on demand
+
 ## v1.2.0 - 2026-04-19
 
 Decky plugin upgrade focused on handheld usability and HHD coexistence.

@@ -52,6 +52,7 @@ Plugin files:
 - `main.py`
 - `src/index.tsx`
 - `dist/index.js` after frontend build
+- `bin/ryzenadj` bundled fallback binary
 
 Plugin capabilities:
 
@@ -66,6 +67,7 @@ Plugin capabilities:
 - coexist with Handheld Daemon by disabling only HHD TDP management when compatibility mode is enabled
 - expose a full-size advanced editor for profile automation and current game tuning
 - include an experimental desired FPS target setting
+- prefer installed `ryzenadj` automatically, while still allowing bundled or downloaded fallback selection
 
 Build frontend:
 

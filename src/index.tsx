@@ -46,6 +46,19 @@ type RuntimeState = {
     compatibility_mode: boolean;
     auto_disabled_by_plugin: boolean;
   };
+  ryzenadj: {
+    selected_source: string;
+    active_source: string | null;
+    resolved_path: string | null;
+    system_available: boolean;
+    bundled_available: boolean;
+    downloaded_available: boolean;
+    system_path: string | null;
+    bundled_path: string | null;
+    downloaded_path: string | null;
+    download_url: string;
+    sources: string[];
+  };
 };
 
 type DeckyState = {
@@ -64,6 +77,7 @@ type DeckyState = {
     desired_fps_enabled: boolean;
     hhd_compatibility_mode: boolean;
     restore_hhd_tdp_on_disable: boolean;
+    ryzenadj_source: string;
   };
   profiles: Array<{
     key: string;
@@ -85,6 +99,8 @@ const setProfileOverride = callable<[string, number | null], DeckyState>("set_pr
 const setPluginSettings = callable<[Record<string, string | number | boolean>], DeckyState>("set_plugin_settings");
 const updateActiveGameProfile = callable<[Record<string, string | number | boolean | null>], DeckyState>("update_active_game_profile");
 const syncHhdTdp = callable<[boolean], DeckyState>("sync_hhd_tdp");
+const setRyzenadjSource = callable<[string], DeckyState>("set_ryzenadj_source");
+const downloadRyzenadj = callable<[], DeckyState>("download_ryzenadj");
 
 function labelize(value: string): string {
   return value
@@ -377,6 +393,38 @@ function AdvancedModal(props: {
       ),
     },
     {
+      title: "RyzenAdj",
+      identifier: "ryzenadj",
+      content: (
+        <>
+          <PanelSection title="Binary Source">
+            <PanelSectionRow>Selected source: {labelize(data.state.ryzenadj.selected_source)}</PanelSectionRow>
+            <PanelSectionRow>Active source: {data.state.ryzenadj.active_source ? labelize(data.state.ryzenadj.active_source) : "Unavailable"}</PanelSectionRow>
+            <PanelSectionRow>
+              <DropdownItem
+                label="RyzenAdj source"
+                description="Auto prefers installed system binary, then bundled, then downloaded"
+                rgOptions={data.state.ryzenadj.sources.map((source) => ({ data: source, label: labelize(source) }))}
+                selectedOption={data.settings.ryzenadj_source}
+                onChange={async (option) => onState(await setRyzenadjSource(String(option.data)))}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>System available: {data.state.ryzenadj.system_available ? "Yes" : "No"}</PanelSectionRow>
+            <PanelSectionRow>Bundled available: {data.state.ryzenadj.bundled_available ? "Yes" : "No"}</PanelSectionRow>
+            <PanelSectionRow>Downloaded available: {data.state.ryzenadj.downloaded_available ? "Yes" : "No"}</PanelSectionRow>
+            <PanelSectionRow>Resolved path: {data.state.ryzenadj.resolved_path ?? "None"}</PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem
+                label="Download precompiled RyzenAdj"
+                description="Fetch plugin-managed fallback binary"
+                onClick={async () => onState(await downloadRyzenadj())}
+              />
+            </PanelSectionRow>
+          </PanelSection>
+        </>
+      ),
+    },
+    {
       title: "Battery",
       identifier: "battery",
       content: (
@@ -486,6 +534,7 @@ function Content() {
         <PanelSectionRow>CPU usage: {data.state.cpu_usage}%</PanelSectionRow>
         <PanelSectionRow>Current TDP: {data.state.current_tdp ?? resolved.ACTIVE_DEFAULT_TDP} mW</PanelSectionRow>
         <PanelSectionRow>Effective mode: {labelize(currentMode)}</PanelSectionRow>
+        <PanelSectionRow>RyzenAdj: {data.state.ryzenadj.active_source ? `${labelize(data.state.ryzenadj.active_source)} (${data.state.ryzenadj.resolved_path})` : "Unavailable"}</PanelSectionRow>
         <PanelSectionRow>{batterySummary(data.state)}</PanelSectionRow>
       </PanelSection>
 
