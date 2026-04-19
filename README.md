@@ -57,10 +57,15 @@ Plugin capabilities:
 
 - enable or disable AutoTDP from Decky UI
 - select device profile and performance mode
-- set global overrides for TDP and monitor interval
+- set TDP and monitor interval with gamepad-friendly sliders
+- estimate battery time from live battery telemetry
+- auto-switch battery profiles while still preserving a manual base mode
 - detect active game by Steam AppID, executable, or Wine/Proton fallback
-- apply per-game override for currently detected title
-- experimental LED control for ASUS/ROG-class devices through `asusctl` or matching sysfs LED nodes
+- fetch Steam game naming metadata from SteamDB with fallback to Steam appdetails
+- apply and auto-save per-game overrides for currently detected title
+- coexist with Handheld Daemon by disabling only HHD TDP management when compatibility mode is enabled
+- expose a full-size advanced editor for profile automation and current game tuning
+- include an experimental desired FPS target setting
 
 Build frontend:
 

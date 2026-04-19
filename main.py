@@ -2,9 +2,14 @@ import asyncio
 import copy
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from html import unescape
 from typing import Any, Dict, List, Optional, Tuple
 
 import decky
@@ -21,21 +26,36 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "STABLE_SAMPLE_COUNT": 2,
     "BATTERY_MAX_TDP": 18000,
     "PERFORMANCE_MODE": "balanced",
+    "DESIRED_FPS": 60,
 }
 
 PERFORMANCE_MODES: Tuple[str, ...] = ("silent", "battery", "balanced", "performance", "turbo")
-SUPPORTED_OVERRIDE_KEYS: Tuple[str, ...] = (
-    "MIN_TDP",
+PROFILE_OVERRIDE_KEYS: Tuple[str, ...] = (
     "DEFAULT_TDP",
-    "MAX_CPU_TDP",
-    "STEP_TDP",
-    "RYZENADJ_EXEC",
-    "RYZENADJ_DELAY",
-    "MONITOR_INTERVAL",
-    "STABLE_SAMPLE_COUNT",
     "BATTERY_MAX_TDP",
+    "MONITOR_INTERVAL",
     "PERFORMANCE_MODE",
+    "DESIRED_FPS",
 )
+PLUGIN_DEFAULTS: Dict[str, Any] = {
+    "enabled": False,
+    "device_profile": "generic",
+    "performance_mode": "balanced",
+    "profile_overrides": {},
+    "game_overrides": {},
+    "auto_save_game_profiles": True,
+    "auto_battery_switch": True,
+    "battery_mode": "battery",
+    "battery_low_mode": "silent",
+    "battery_low_threshold": 25,
+    "desired_fps": 60,
+    "desired_fps_enabled": False,
+    "hhd_compatibility_mode": True,
+    "restore_hhd_tdp_on_disable": True,
+    "steamdb_cache": {},
+    "hhd_auto_disabled_tdp": False,
+    "hhd_previous_tdp_enabled": None,
+}
 
 
 class Plugin:
@@ -43,9 +63,13 @@ class Plugin:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.monitor_task: Optional[asyncio.Task[Any]] = None
         self.plugin_dir = os.path.dirname(os.path.abspath(__file__))
-        self.settings_dir = getattr(decky, "decky_SETTINGS_DIR", self.plugin_dir)
-        self.runtime_dir = getattr(decky, "decky_RUNTIME_DIR", self.plugin_dir)
-        self.logs_dir = getattr(decky, "decky_LOG_DIR", self.plugin_dir)
+        user_home = os.path.expanduser("~")
+        fallback_settings_dir = os.path.join(user_home, ".config", "autotdp-decky")
+        fallback_runtime_dir = os.path.join(user_home, ".local", "share", "autotdp-decky")
+        fallback_logs_dir = os.path.join(user_home, ".local", "state", "autotdp-decky")
+        self.settings_dir = getattr(decky, "decky_SETTINGS_DIR", None) or getattr(decky, "decky_settings_dir", None) or getattr(decky, "DECKY_SETTINGS_DIR", None) or fallback_settings_dir
+        self.runtime_dir = getattr(decky, "decky_RUNTIME_DIR", None) or getattr(decky, "decky_runtime_dir", None) or getattr(decky, "DECKY_RUNTIME_DIR", None) or fallback_runtime_dir
+        self.logs_dir = getattr(decky, "decky_LOG_DIR", None) or getattr(decky, "decky_log_dir", None) or getattr(decky, "DECKY_LOG_DIR", None) or fallback_logs_dir
         self.settings_path = os.path.join(self.settings_dir, "autotdp_settings.json")
         self.device_profiles_path = os.path.join(self.plugin_dir, "known_devices.json")
         self.game_profiles_path = os.path.join(self.plugin_dir, "game_profiles.json")
@@ -61,11 +85,12 @@ class Plugin:
             "active_game": None,
             "active_device_profile": None,
             "resolved_config": copy.deepcopy(DEFAULT_CONFIG),
-            "led": {},
+            "battery": {},
+            "hhd": {},
         }
-        self._last_adjustment = 0.0
         self._candidate_tdp: Optional[int] = None
         self._stable_samples = 0
+        self._last_adjustment = 0.0
 
     async def _main(self):
         self.loop = asyncio.get_event_loop()
@@ -74,7 +99,7 @@ class Plugin:
         os.makedirs(self.logs_dir, exist_ok=True)
         self._load_profiles()
         self._load_settings()
-        self._refresh_static_state()
+        self._refresh_state()
         self.monitor_task = self.loop.create_task(self._monitor_loop())
         decky.logger.info("AutoTDP Decky plugin loaded")
 
@@ -85,97 +110,137 @@ class Plugin:
                 await self.monitor_task
             except asyncio.CancelledError:
                 pass
+
         if self.current_state.get("current_tdp") is not None:
-            config = self._resolve_runtime_config(None)
-            self._set_tdp_sync(int(config["ACTIVE_DEFAULT_TDP"]))
+            config = self.current_state.get("resolved_config", DEFAULT_CONFIG)
+            self._set_tdp_sync(int(config.get("ACTIVE_DEFAULT_TDP", config.get("DEFAULT_TDP", 10000))))
+
+        self._restore_hhd_tdp_if_needed()
         decky.logger.info("AutoTDP Decky plugin unloaded")
 
     async def _uninstall(self):
         await self._unload()
 
     async def get_state(self) -> Dict[str, Any]:
-        self._refresh_static_state()
-        return {
-            "settings": self.settings,
-            "profiles": self._list_device_profiles(),
-            "modes": list(PERFORMANCE_MODES),
-            "gameProfiles": self.game_profiles,
-            "state": self.current_state,
-            "ledCapabilities": self._detect_led_capabilities(),
-        }
+        self._refresh_state()
+        return self._compose_state()
 
     async def set_enabled(self, enabled: bool) -> Dict[str, Any]:
         self.settings["enabled"] = bool(enabled)
         self._save_settings()
-        self._refresh_static_state()
-        return await self.get_state()
+        self._refresh_state()
+        if enabled:
+            self._ensure_hhd_compatibility(force=False)
+        else:
+            self._restore_hhd_tdp_if_needed()
+        self._refresh_state()
+        return self._compose_state()
 
     async def set_device_profile(self, profile: str) -> Dict[str, Any]:
         self.settings["device_profile"] = profile
         self._save_settings()
-        self._refresh_static_state()
-        return await self.get_state()
+        self._refresh_state()
+        return self._compose_state()
 
     async def set_performance_mode(self, mode: str) -> Dict[str, Any]:
         if mode not in PERFORMANCE_MODES:
             raise ValueError(f"Unknown mode: {mode}")
         self.settings["performance_mode"] = mode
         self._save_settings()
-        self._refresh_static_state()
-        return await self.get_state()
+        self._refresh_state()
+        return self._compose_state()
 
-    async def set_override(self, key: str, value: Optional[str]) -> Dict[str, Any]:
-        if key not in SUPPORTED_OVERRIDE_KEYS:
-            raise ValueError(f"Unsupported override key: {key}")
-        overrides = self.settings.setdefault("overrides", {})
-        if value is None or value == "":
-            overrides.pop(key, None)
+    async def set_profile_override(self, key: str, value: Optional[int]) -> Dict[str, Any]:
+        if key not in PROFILE_OVERRIDE_KEYS:
+            raise ValueError(f"Unsupported profile override key: {key}")
+
+        target_game = self.current_state.get("active_game") if self.settings.get("auto_save_game_profiles", True) else None
+        if target_game:
+            target_key = self._build_game_override_key(target_game)
+            game_overrides = self.settings.setdefault("game_overrides", {})
+            entry = game_overrides.setdefault(target_key, {})
+            if value is None:
+                entry.pop(key, None)
+            else:
+                entry[key] = int(value) if key != "PERFORMANCE_MODE" else value
+            if not entry:
+                game_overrides.pop(target_key, None)
         else:
-            overrides[key] = value
-        self._save_settings()
-        self._refresh_static_state()
-        return await self.get_state()
+            overrides = self.settings.setdefault("profile_overrides", {})
+            if value is None:
+                overrides.pop(key, None)
+            else:
+                overrides[key] = int(value) if key != "PERFORMANCE_MODE" else value
 
-    async def set_current_game_override(self, patch: Dict[str, Any]) -> Dict[str, Any]:
+        self._save_settings()
+        self._refresh_state()
+        return self._compose_state()
+
+    async def set_plugin_settings(self, patch: Dict[str, Any]) -> Dict[str, Any]:
+        for key, value in patch.items():
+            if key in {
+                "auto_save_game_profiles",
+                "auto_battery_switch",
+                "desired_fps_enabled",
+                "hhd_compatibility_mode",
+                "restore_hhd_tdp_on_disable",
+            }:
+                self.settings[key] = bool(value)
+            elif key in {"battery_low_threshold", "desired_fps"}:
+                self.settings[key] = int(value)
+            elif key in {"battery_mode", "battery_low_mode"}:
+                if value not in PERFORMANCE_MODES:
+                    raise ValueError(f"Unknown mode: {value}")
+                self.settings[key] = value
+
+        self._save_settings()
+        self._refresh_state()
+        if self.settings.get("enabled"):
+            self._ensure_hhd_compatibility(force=False)
+        return self._compose_state()
+
+    async def update_active_game_profile(self, patch: Dict[str, Any]) -> Dict[str, Any]:
         active_game = self._detect_active_game()
         if not active_game:
             raise ValueError("No active game detected")
 
-        override_key = self._build_game_override_key(active_game)
-        overrides = self.settings.setdefault("game_overrides", {})
-        entry = overrides.setdefault(override_key, {})
+        target_key = self._build_game_override_key(active_game)
+        game_overrides = self.settings.setdefault("game_overrides", {})
+        entry = game_overrides.setdefault(target_key, {})
 
         for key, value in patch.items():
             if key == "clear" and value:
-                overrides.pop(override_key, None)
-                break
-            if key in SUPPORTED_OVERRIDE_KEYS:
-                if value is None or value == "":
-                    entry.pop(key, None)
-                else:
-                    entry[key] = value
+                game_overrides.pop(target_key, None)
+                continue
+            if key not in PROFILE_OVERRIDE_KEYS:
+                continue
+            if value is None or value == "":
+                entry.pop(key, None)
+            elif key == "PERFORMANCE_MODE":
+                if value not in PERFORMANCE_MODES:
+                    raise ValueError(f"Unknown mode: {value}")
+                entry[key] = value
+            else:
+                entry[key] = int(value)
 
-        if override_key in overrides and not overrides[override_key]:
-            overrides.pop(override_key, None)
+        if target_key in game_overrides and not game_overrides[target_key]:
+            game_overrides.pop(target_key, None)
 
         self._save_settings()
-        self._refresh_static_state()
-        return await self.get_state()
+        self._refresh_state()
+        return self._compose_state()
 
-    async def cycle_led_mode(self, direction: str = "next") -> Dict[str, Any]:
-        await asyncio.to_thread(self._cycle_led_mode_sync, direction)
-        self._refresh_static_state()
-        return await self.get_state()
-
-    async def set_led_brightness(self, brightness: int) -> Dict[str, Any]:
-        await asyncio.to_thread(self._set_led_brightness_sync, brightness)
-        self._refresh_static_state()
-        return await self.get_state()
-
-    async def set_led_color(self, color: str) -> Dict[str, Any]:
-        await asyncio.to_thread(self._set_led_color_sync, color)
-        self._refresh_static_state()
-        return await self.get_state()
+    async def sync_hhd_tdp(self, enable_hhd_tdp: bool) -> Dict[str, Any]:
+        self._set_hhd_tdp_enabled(enable_hhd_tdp)
+        if enable_hhd_tdp:
+            self.settings["hhd_auto_disabled_tdp"] = False
+            self.settings["hhd_previous_tdp_enabled"] = None
+        else:
+            self.settings["hhd_auto_disabled_tdp"] = True
+            self.settings["hhd_previous_tdp_enabled"] = True
+        self._save_settings()
+        self._refresh_state()
+        return self._compose_state()
 
     def _load_profiles(self) -> None:
         self.device_profiles = self._read_json_file(self.device_profiles_path, {"profiles": {}})
@@ -185,16 +250,9 @@ class Plugin:
         )
 
     def _load_settings(self) -> None:
-        self.settings = self._read_json_file(
-            self.settings_path,
-            {
-                "enabled": False,
-                "device_profile": "generic",
-                "performance_mode": "balanced",
-                "overrides": {},
-                "game_overrides": {},
-            },
-        )
+        self.settings = self._read_json_file(self.settings_path, copy.deepcopy(PLUGIN_DEFAULTS))
+        for key, value in PLUGIN_DEFAULTS.items():
+            self.settings.setdefault(key, copy.deepcopy(value))
 
     def _save_settings(self) -> None:
         with open(self.settings_path, "w", encoding="utf-8") as handle:
@@ -206,6 +264,15 @@ class Plugin:
                 return json.load(handle)
         except Exception:
             return copy.deepcopy(fallback)
+
+    def _compose_state(self) -> Dict[str, Any]:
+        return {
+            "settings": self.settings,
+            "profiles": self._list_device_profiles(),
+            "modes": list(PERFORMANCE_MODES),
+            "gameProfiles": self.game_profiles,
+            "state": self.current_state,
+        }
 
     def _list_device_profiles(self) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
@@ -231,19 +298,21 @@ class Plugin:
                 return key
         return None
 
-    def _apply_profile_config(self, config: Dict[str, Any], profile_file: Dict[str, Any], profile_name: str) -> Dict[str, Any]:
+    def _apply_device_profile(self, config: Dict[str, Any], profile_name: str) -> Dict[str, Any]:
         resolved_name = self._resolve_device_profile_name(profile_name)
         if not resolved_name:
             raise ValueError(f"Unknown device profile: {profile_name}")
-        profile = profile_file.get("profiles", {}).get(resolved_name, {})
+
+        profile = self.device_profiles.get("profiles", {}).get(resolved_name, {})
         if not profile.get("supported", True):
             raise ValueError(profile.get("unsupported_reason", "Unsupported device profile"))
+
         merged = copy.deepcopy(config)
         merged.update(profile.get("config", {}))
         merged["DEVICE_PROFILE"] = resolved_name
         return merged
 
-    def _coerce_config_types(self, config: Dict[str, Any]) -> Dict[str, Any]:
+    def _coerce_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         coerced = copy.deepcopy(config)
         for key in (
             "MIN_TDP",
@@ -254,17 +323,19 @@ class Plugin:
             "MONITOR_INTERVAL",
             "STABLE_SAMPLE_COUNT",
             "BATTERY_MAX_TDP",
+            "DESIRED_FPS",
         ):
             coerced[key] = int(coerced[key])
-        coerced["RYZENADJ_EXEC"] = str(coerced["RYZENADJ_EXEC"])
         coerced["PERFORMANCE_MODE"] = str(coerced["PERFORMANCE_MODE"])
+        coerced["RYZENADJ_EXEC"] = str(coerced["RYZENADJ_EXEC"])
         return coerced
 
-    def _apply_mode(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        mode = config["PERFORMANCE_MODE"]
-        if mode not in PERFORMANCE_MODES:
-            mode = "balanced"
+    def _align_to_step(self, value: int, step: int, minimum: int) -> int:
+        if value < minimum:
+            value = minimum
+        return int((value // step) * step)
 
+    def _apply_mode(self, config: Dict[str, Any], mode: str) -> Dict[str, Any]:
         min_tdp = int(config["MIN_TDP"])
 
         def scale(value: int, percent: int) -> int:
@@ -307,10 +378,10 @@ class Plugin:
 
         active_default = min(active_default, active_max)
         active_battery = min(active_battery, active_max)
-
-        config = copy.deepcopy(config)
-        config.update(
+        out = copy.deepcopy(config)
+        out.update(
             {
+                "ACTIVE_MODE": mode,
                 "ACTIVE_MAX_TDP": active_max,
                 "ACTIVE_DEFAULT_TDP": active_default,
                 "ACTIVE_BATTERY_MAX_TDP": active_battery,
@@ -320,78 +391,80 @@ class Plugin:
                 "ACTIVE_STABLE_SAMPLE_COUNT": max(1, active_stable),
             }
         )
-        return config
+        return out
 
-    def _align_to_step(self, value: int, step: int, minimum: int) -> int:
-        if value < minimum:
-            value = minimum
-        return int((value // step) * step)
+    def _apply_desired_fps(self, config: Dict[str, Any], fps_value: int, enabled: bool) -> Dict[str, Any]:
+        out = copy.deepcopy(config)
+        out["DESIRED_FPS"] = fps_value
+        out["DESIRED_FPS_ENABLED"] = enabled
+        if not enabled:
+            return out
 
-    def _detect_active_game(self) -> Optional[Dict[str, Any]]:
-        steam_appid = self._detect_steam_appid()
-        if steam_appid:
-            profile_name = self.game_profiles.get("steam_appids", {}).get(steam_appid, {}).get("profile")
-            return {
-                "source": "steam_appid",
-                "match": steam_appid,
-                "profile": profile_name,
-                "display_name": self._lookup_game_profile_name(profile_name),
-            }
+        fps = max(30, min(120, int(fps_value)))
+        if fps <= 30:
+            percent = 70
+        elif fps <= 40:
+            percent = 80
+        elif fps <= 45:
+            percent = 87
+        elif fps <= 50:
+            percent = 93
+        elif fps <= 60:
+            percent = 100
+        elif fps <= 72:
+            percent = 105
+        elif fps <= 90:
+            percent = 110
+        else:
+            percent = 115
 
-        executable = self._detect_executable_name()
-        if executable:
-            profile_name = self.game_profiles.get("executables", {}).get(executable, {}).get("profile")
-            return {
-                "source": "executable",
-                "match": executable,
-                "profile": profile_name,
-                "display_name": self._lookup_game_profile_name(profile_name) or executable,
-            }
+        min_tdp = int(out["MIN_TDP"])
+        step = int(out["STEP_TDP"])
+        out["ACTIVE_MAX_TDP"] = self._align_to_step(max(min_tdp, int(out["ACTIVE_MAX_TDP"] * percent / 100)), step, min_tdp)
+        out["ACTIVE_DEFAULT_TDP"] = min(
+            out["ACTIVE_MAX_TDP"],
+            self._align_to_step(max(min_tdp, int(out["ACTIVE_DEFAULT_TDP"] * percent / 100)), step, min_tdp),
+        )
+        out["ACTIVE_BATTERY_MAX_TDP"] = min(
+            out["ACTIVE_MAX_TDP"],
+            self._align_to_step(max(min_tdp, int(out["ACTIVE_BATTERY_MAX_TDP"] * percent / 100)), step, min_tdp),
+        )
+        return out
 
-        launcher = self._detect_launcher_type()
-        if launcher:
-            profile_name = self.game_profiles.get("launcher_types", {}).get(launcher, {}).get("profile")
-            return {
-                "source": "launcher_type",
-                "match": launcher,
-                "profile": profile_name,
-                "display_name": self._lookup_game_profile_name(profile_name) or launcher,
-            }
-
-        return None
-
-    def _build_game_override_key(self, game_info: Dict[str, Any]) -> str:
-        return f"{game_info['source']}:{game_info['match']}"
-
-    def _lookup_game_profile_name(self, profile_name: Optional[str]) -> Optional[str]:
-        if not profile_name:
-            return None
-        return self.game_profiles.get("profiles", {}).get(profile_name, {}).get("display_name", profile_name)
-
-    def _resolve_runtime_config(self, active_game: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    def _resolve_runtime_config(self, active_game: Optional[Dict[str, Any]], battery: Dict[str, Any]) -> Dict[str, Any]:
         config = copy.deepcopy(DEFAULT_CONFIG)
-        device_profile = self.settings.get("device_profile", "generic")
-        config = self._apply_profile_config(config, self.device_profiles, device_profile)
+        config = self._apply_device_profile(config, str(self.settings.get("device_profile", "generic")))
+        config["PERFORMANCE_MODE"] = str(self.settings.get("performance_mode", config["PERFORMANCE_MODE"]))
+        config["DESIRED_FPS"] = int(self.settings.get("desired_fps", config["DESIRED_FPS"]))
 
-        global_mode = self.settings.get("performance_mode", config["PERFORMANCE_MODE"])
-        config["PERFORMANCE_MODE"] = global_mode
-
-        for key, value in self.settings.get("overrides", {}).items():
-            if key in SUPPORTED_OVERRIDE_KEYS:
-                config[key] = value
+        for key, value in self.settings.get("profile_overrides", {}).items():
+            config[key] = value
 
         if active_game and active_game.get("profile"):
-            game_profile = self.game_profiles.get("profiles", {}).get(active_game["profile"], {})
-            config.update(game_profile.get("config", {}))
+            bundled = self.game_profiles.get("profiles", {}).get(active_game["profile"], {})
+            config.update(bundled.get("config", {}))
 
         if active_game:
-            override_key = self._build_game_override_key(active_game)
-            for key, value in self.settings.get("game_overrides", {}).get(override_key, {}).items():
-                if key in SUPPORTED_OVERRIDE_KEYS:
-                    config[key] = value
+            game_override_key = self._build_game_override_key(active_game)
+            for key, value in self.settings.get("game_overrides", {}).get(game_override_key, {}).items():
+                config[key] = value
 
-        config = self._coerce_config_types(config)
-        return self._apply_mode(config)
+        config = self._coerce_config(config)
+        base_mode = config["PERFORMANCE_MODE"]
+
+        if self.settings.get("auto_battery_switch", True) and battery.get("status") == "Discharging":
+            if battery.get("percent") is not None and battery["percent"] <= int(self.settings.get("battery_low_threshold", 25)):
+                base_mode = str(self.settings.get("battery_low_mode", "silent"))
+            else:
+                base_mode = str(self.settings.get("battery_mode", "battery"))
+
+        config = self._apply_mode(config, base_mode)
+        config = self._apply_desired_fps(
+            config,
+            int(config.get("DESIRED_FPS", self.settings.get("desired_fps", 60))),
+            bool(self.settings.get("desired_fps_enabled", False)),
+        )
+        return config
 
     def _read_cpu_times(self) -> Tuple[int, int]:
         with open("/proc/stat", "r", encoding="utf-8") as handle:
@@ -408,15 +481,117 @@ class Plugin:
         if total_delta <= 0:
             return 0, current_total, current_idle
         busy_delta = max(0, total_delta - idle_delta)
-        usage = int((busy_delta * 100) / total_delta)
-        return usage, current_total, current_idle
+        return int((busy_delta * 100) / total_delta), current_total, current_idle
+
+    def _read_battery(self) -> Dict[str, Any]:
+        power_root = "/sys/class/power_supply"
+        empty = {
+            "present": False,
+            "percent": None,
+            "status": None,
+            "power_w": None,
+            "energy_wh": None,
+            "seconds_remaining": None,
+            "formatted_time_remaining": None,
+        }
+        if not os.path.isdir(power_root):
+            return empty
+
+        battery_path = None
+        for name in os.listdir(power_root):
+            candidate = os.path.join(power_root, name)
+            type_path = os.path.join(candidate, "type")
+            if not os.path.isfile(type_path):
+                continue
+            try:
+                with open(type_path, "r", encoding="utf-8") as handle:
+                    if handle.read().strip() == "Battery":
+                        battery_path = candidate
+                        break
+            except OSError:
+                continue
+
+        if not battery_path:
+            return empty
+
+        def read_value(*filenames: str) -> Optional[float]:
+            for filename in filenames:
+                path = os.path.join(battery_path, filename)
+                if not os.path.isfile(path):
+                    continue
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        raw = handle.read().strip()
+                    if raw == "":
+                        continue
+                    return float(raw)
+                except OSError:
+                    continue
+            return None
+
+        percent = read_value("capacity")
+        status = None
+        status_path = os.path.join(battery_path, "status")
+        if os.path.isfile(status_path):
+            try:
+                with open(status_path, "r", encoding="utf-8") as handle:
+                    status = handle.read().strip()
+            except OSError:
+                status = None
+
+        energy_now = read_value("energy_now", "charge_now")
+        energy_full = read_value("energy_full", "charge_full")
+        power_now = read_value("power_now")
+        current_now = read_value("current_now")
+        voltage_now = read_value("voltage_now")
+
+        if power_now is None and current_now is not None and voltage_now is not None:
+            power_now = current_now * voltage_now / 1000000000000.0
+        elif power_now is not None:
+            power_now = power_now / 1000000.0
+
+        energy_wh = None
+        if energy_now is not None:
+            if os.path.isfile(os.path.join(battery_path, "energy_now")):
+                energy_wh = energy_now / 1000000.0
+            elif voltage_now is not None:
+                energy_wh = energy_now * voltage_now / 1000000000000.0
+
+        seconds_remaining = None
+        if status == "Discharging" and power_now and power_now > 0 and energy_wh and energy_wh > 0:
+            seconds_remaining = int((energy_wh / power_now) * 3600)
+        elif status == "Charging" and power_now and power_now > 0 and energy_full and energy_now is not None:
+            if os.path.isfile(os.path.join(battery_path, "energy_full")):
+                remaining_wh = max(0.0, (energy_full - energy_now) / 1000000.0)
+            elif voltage_now is not None:
+                remaining_wh = max(0.0, (energy_full - energy_now) * voltage_now / 1000000000000.0)
+            else:
+                remaining_wh = 0.0
+            if remaining_wh > 0:
+                seconds_remaining = int((remaining_wh / power_now) * 3600)
+
+        formatted = None
+        if seconds_remaining is not None:
+            hours = seconds_remaining // 3600
+            minutes = (seconds_remaining % 3600) // 60
+            formatted = f"{hours}h {minutes}m"
+
+        return {
+            "present": True,
+            "percent": int(percent) if percent is not None else None,
+            "status": status,
+            "power_w": round(power_now, 2) if power_now is not None else None,
+            "energy_wh": round(energy_wh, 2) if energy_wh is not None else None,
+            "seconds_remaining": seconds_remaining,
+            "formatted_time_remaining": formatted,
+        }
 
     def _is_on_external_power(self) -> bool:
-        power_supply_dir = "/sys/class/power_supply"
-        if not os.path.isdir(power_supply_dir):
+        power_root = "/sys/class/power_supply"
+        if not os.path.isdir(power_root):
             return False
-        for name in os.listdir(power_supply_dir):
-            base = os.path.join(power_supply_dir, name)
+        for name in os.listdir(power_root):
+            base = os.path.join(power_root, name)
             type_path = os.path.join(base, "type")
             online_path = os.path.join(base, "online")
             if not (os.path.isfile(type_path) and os.path.isfile(online_path)):
@@ -434,36 +609,11 @@ class Plugin:
                 continue
         return False
 
-    def _determine_tdp(self, cpu_usage: int, config: Dict[str, Any]) -> int:
-        tdp_values = [
-            int(config["MIN_TDP"]),
-            int(config["ACTIVE_MAX_TDP"] * 1 / 8),
-            int(config["ACTIVE_MAX_TDP"] * 1 / 4),
-            int(config["ACTIVE_MAX_TDP"] * 3 / 8),
-            int(config["ACTIVE_MAX_TDP"] * 1 / 2),
-            int(config["ACTIVE_MAX_TDP"] * 5 / 8),
-            int(config["ACTIVE_MAX_TDP"] * 3 / 4),
-            int(config["ACTIVE_MAX_TDP"] * 7 / 8),
-            int(config["ACTIVE_MAX_TDP"]),
-        ]
-        thresholds = [0, 10, 20, 30, 40, 50, 60, 70, 80]
-        tdp = int(config["MIN_TDP"])
-        for index, threshold in enumerate(thresholds):
-            adjusted = max(0, min(100, threshold + int(config["ACTIVE_THRESHOLD_OFFSET"])))
-            if cpu_usage > adjusted:
-                tdp = tdp_values[index]
-        return self._align_to_step(tdp, int(config["STEP_TDP"]), int(config["MIN_TDP"]))
-
-    def _apply_power_source_limit(self, requested_tdp: int, config: Dict[str, Any], external_power: bool) -> int:
-        if external_power:
-            return requested_tdp
-        return min(requested_tdp, int(config["ACTIVE_BATTERY_MAX_TDP"]))
-
     def _command_exists(self, command: str) -> bool:
         return shutil.which(command) is not None
 
     def _set_tdp_sync(self, value: int) -> None:
-        command = self.current_state.get("resolved_config", {}).get("RYZENADJ_EXEC", DEFAULT_CONFIG["RYZENADJ_EXEC"])
+        command = str(self.current_state.get("resolved_config", {}).get("RYZENADJ_EXEC", DEFAULT_CONFIG["RYZENADJ_EXEC"]))
         if not self._command_exists(command):
             decky.logger.warning("ryzenadj not found, skipping TDP update")
             return
@@ -477,77 +627,148 @@ class Plugin:
         except Exception as error:
             decky.logger.error(f"Failed to set TDP: {error}")
 
-    def _refresh_static_state(self) -> None:
-        active_game = self._detect_active_game()
-        config = self._resolve_runtime_config(active_game)
-        self.current_state["enabled"] = bool(self.settings.get("enabled", False))
-        self.current_state["active_game"] = active_game
-        self.current_state["active_device_profile"] = config.get("DEVICE_PROFILE")
-        self.current_state["resolved_config"] = config
-        self.current_state["led"] = self._detect_led_capabilities()
+    def _get_hhd_state(self) -> Dict[str, Any]:
+        state = {
+            "available": self._command_exists("hhdctl"),
+            "service_active": False,
+            "tdp_enabled": None,
+            "compatibility_mode": bool(self.settings.get("hhd_compatibility_mode", True)),
+            "auto_disabled_by_plugin": bool(self.settings.get("hhd_auto_disabled_tdp", False)),
+        }
+        if not state["available"]:
+            return state
 
-    async def _monitor_loop(self) -> None:
-        previous_total, previous_idle = self._read_cpu_times()
-        while True:
-            self._refresh_static_state()
-            enabled = bool(self.settings.get("enabled", False))
-            config = self.current_state["resolved_config"]
+        try:
+            service = subprocess.run(
+                ["systemctl", "list-units", "--type=service", "--all", "hhd@*.service", "hhd_local@*.service"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            state["service_active"] = "active" in service.stdout
+        except Exception:
+            state["service_active"] = False
 
-            if not enabled:
-                self._candidate_tdp = None
-                self._stable_samples = 0
-                await asyncio.sleep(1)
-                previous_total, previous_idle = self._read_cpu_times()
-                continue
+        try:
+            result = subprocess.run(
+                ["hhdctl", "get", "hhd.settings.tdp_enable", "--values", "--sep", ""],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                state["tdp_enabled"] = result.stdout.strip().lower() == "true"
+        except Exception:
+            state["tdp_enabled"] = None
 
-            await asyncio.sleep(int(config["ACTIVE_MONITOR_INTERVAL"]))
-            cpu_usage, previous_total, previous_idle = self._get_cpu_usage(previous_total, previous_idle)
-            external_power = self._is_on_external_power()
-            requested_tdp = self._determine_tdp(cpu_usage, config)
-            limited_tdp = self._apply_power_source_limit(requested_tdp, config, external_power)
+        return state
 
-            self.current_state["cpu_usage"] = cpu_usage
-            self.current_state["external_power"] = external_power
+    def _set_hhd_tdp_enabled(self, enabled: bool) -> bool:
+        if not self._command_exists("hhdctl"):
+            return False
+        try:
+            result = subprocess.run(
+                ["hhdctl", "set", f"hhd.settings.tdp_enable={'true' if enabled else 'false'}"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode == 0
+        except Exception as error:
+            decky.logger.error(f"Failed to set HHD TDP state: {error}")
+            return False
 
-            current_tdp = self.current_state.get("current_tdp")
-            if current_tdp is None:
-                current_tdp = int(config["ACTIVE_DEFAULT_TDP"])
-                self.current_state["current_tdp"] = current_tdp
+    def _ensure_hhd_compatibility(self, force: bool) -> None:
+        if not self.settings.get("enabled", False):
+            return
+        if not self.settings.get("hhd_compatibility_mode", True):
+            return
+        hhd_state = self._get_hhd_state()
+        if not hhd_state.get("available"):
+            return
+        if hhd_state.get("tdp_enabled") is True or force:
+            if hhd_state.get("tdp_enabled") is True:
+                self.settings["hhd_previous_tdp_enabled"] = True
+            if self._set_hhd_tdp_enabled(False):
+                self.settings["hhd_auto_disabled_tdp"] = True
+                self._save_settings()
 
-            if limited_tdp == current_tdp:
-                self._candidate_tdp = limited_tdp
-                self._stable_samples = 0
-                continue
+    def _restore_hhd_tdp_if_needed(self) -> None:
+        if not self.settings.get("restore_hhd_tdp_on_disable", True):
+            return
+        if not self.settings.get("hhd_auto_disabled_tdp", False):
+            return
+        if not self.settings.get("hhd_previous_tdp_enabled"):
+            return
+        if self._set_hhd_tdp_enabled(True):
+            self.settings["hhd_auto_disabled_tdp"] = False
+            self.settings["hhd_previous_tdp_enabled"] = None
+            self._save_settings()
 
-            if limited_tdp == self._candidate_tdp:
-                self._stable_samples += 1
-            else:
-                self._candidate_tdp = limited_tdp
-                self._stable_samples = 1
+    def _steamdb_cache_get(self, appid: str) -> Optional[Dict[str, Any]]:
+        cache = self.settings.setdefault("steamdb_cache", {})
+        entry = cache.get(appid)
+        if not entry:
+            return None
+        return entry
 
-            if self._stable_samples < int(config["ACTIVE_STABLE_SAMPLE_COUNT"]):
-                continue
+    def _steamdb_cache_set(self, appid: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        cache = self.settings.setdefault("steamdb_cache", {})
+        cache[appid] = data
+        self._save_settings()
+        return data
 
-            now = time.time()
-            if now - self._last_adjustment < int(config["ACTIVE_RYZENADJ_DELAY"]):
-                continue
+    def _fetch_steamdb_info(self, appid: str) -> Dict[str, Any]:
+        cached = self._steamdb_cache_get(appid)
+        if cached:
+            return cached
 
-            await asyncio.to_thread(self._set_tdp_sync, limited_tdp)
-            self.current_state["current_tdp"] = limited_tdp
-            self._last_adjustment = now
-            await decky.emit("autotdp_state", self.current_state)
+        steamdb_url = f"https://steamdb.info/app/{appid}/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AutoTDP-Decky/1.2.0",
+        }
+        title = None
+
+        try:
+            request = urllib.request.Request(steamdb_url, headers=headers)
+            with urllib.request.urlopen(request, timeout=5) as response:
+                html = response.read().decode("utf-8", errors="ignore")
+            title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+            if title_match:
+                raw_title = unescape(title_match.group(1)).strip()
+                title = re.sub(r"\s*[\u00b7\-].*SteamDB.*$", "", raw_title).strip()
+        except (urllib.error.URLError, TimeoutError, ValueError):
+            title = None
+
+        if not title:
+            try:
+                store_url = f"https://store.steampowered.com/api/appdetails?appids={urllib.parse.quote(appid)}&l=english"
+                request = urllib.request.Request(store_url, headers=headers)
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+                entry = payload.get(appid, {})
+                if entry.get("success") and entry.get("data", {}).get("name"):
+                    title = str(entry["data"]["name"])
+            except (urllib.error.URLError, TimeoutError, ValueError, KeyError, json.JSONDecodeError):
+                title = None
+
+        data = {
+            "appid": appid,
+            "name": title or f"Steam App {appid}",
+            "steamdb_url": steamdb_url,
+        }
+        return self._steamdb_cache_set(appid, data)
 
     def _iter_processes(self) -> List[int]:
-        pids: List[int] = []
+        out: List[int] = []
         for name in os.listdir("/proc"):
             if name.isdigit():
-                pids.append(int(name))
-        return pids
+                out.append(int(name))
+        return out
 
     def _read_process_environ_value(self, pid: int, env_key: str) -> Optional[str]:
-        path = f"/proc/{pid}/environ"
         try:
-            with open(path, "rb") as handle:
+            with open(f"/proc/{pid}/environ", "rb") as handle:
                 raw = handle.read().split(b"\0")
             for item in raw:
                 if item.startswith(env_key.encode("utf-8") + b"="):
@@ -569,27 +790,22 @@ class Plugin:
                     return candidate
         return None
 
-    def _normalize_executable_name(self, value: str) -> str:
-        return os.path.basename(value).lower()
-
     def _detect_executable_name(self) -> Optional[str]:
         for pid in self._iter_processes():
-            cmdline_path = f"/proc/{pid}/cmdline"
             try:
-                with open(cmdline_path, "rb") as handle:
+                with open(f"/proc/{pid}/cmdline", "rb") as handle:
                     parts = [part.decode("utf-8", errors="ignore") for part in handle.read().split(b"\0") if part]
             except OSError:
                 continue
             for part in parts:
                 if part.lower().endswith(".exe"):
-                    return self._normalize_executable_name(part)
+                    return os.path.basename(part).lower()
         return None
 
     def _detect_launcher_type(self) -> Optional[str]:
         for pid in self._iter_processes():
-            comm_path = f"/proc/{pid}/comm"
             try:
-                with open(comm_path, "r", encoding="utf-8") as handle:
+                with open(f"/proc/{pid}/comm", "r", encoding="utf-8") as handle:
                     comm = handle.read().strip().lower()
             except OSError:
                 continue
@@ -599,68 +815,157 @@ class Plugin:
                 return "steam"
         return None
 
-    def _detect_led_capabilities(self) -> Dict[str, Any]:
-        led_dir = "/sys/class/leds"
-        capabilities: Dict[str, Any] = {
-            "asusctl": self._command_exists("asusctl"),
-            "brightnessTargets": [],
-            "rgbGroups": [],
+    def _lookup_bundled_game_profile(self, appid: Optional[str], executable: Optional[str], launcher: Optional[str]) -> Optional[Tuple[str, str, str]]:
+        if appid:
+            profile_name = self.game_profiles.get("steam_appids", {}).get(appid, {}).get("profile")
+            if profile_name:
+                return "steam_appid", appid, profile_name
+        if executable:
+            profile_name = self.game_profiles.get("executables", {}).get(executable, {}).get("profile")
+            if profile_name:
+                return "executable", executable, profile_name
+        if launcher:
+            profile_name = self.game_profiles.get("launcher_types", {}).get(launcher, {}).get("profile")
+            if profile_name:
+                return "launcher_type", launcher, profile_name
+        return None
+
+    def _detect_active_game(self) -> Optional[Dict[str, Any]]:
+        appid = self._detect_steam_appid()
+        executable = self._detect_executable_name()
+        launcher = self._detect_launcher_type()
+        profile_info = self._lookup_bundled_game_profile(appid, executable, launcher)
+
+        if not appid and not executable and not launcher:
+            return None
+
+        active: Dict[str, Any] = {
+            "source": None,
+            "match": None,
+            "profile": None,
+            "display_name": None,
+            "steam_appid": appid,
+            "steamdb_name": None,
+            "steamdb_url": None,
         }
-        if not os.path.isdir(led_dir):
-            return capabilities
 
-        rgb_groups: Dict[str, Dict[str, str]] = {}
-        for name in os.listdir(led_dir):
-            lower = name.lower()
-            path = os.path.join(led_dir, name)
-            brightness_path = os.path.join(path, "brightness")
-            if any(token in lower for token in ("ally", "rog", "kbd", "keyboard", "lightbar", "aura", "rgb")):
-                if os.path.isfile(brightness_path):
-                    capabilities["brightnessTargets"].append({"name": name, "path": brightness_path})
-            if lower.endswith(":red") or lower.endswith(":green") or lower.endswith(":blue"):
-                base, channel = lower.rsplit(":", 1)
-                group = rgb_groups.setdefault(base, {})
-                group[channel] = brightness_path
+        if profile_info:
+            active["source"], active["match"], active["profile"] = profile_info
+        elif appid:
+            active["source"] = "steam_appid"
+            active["match"] = appid
+        elif executable:
+            active["source"] = "executable"
+            active["match"] = executable
+        else:
+            active["source"] = "launcher_type"
+            active["match"] = launcher
 
-        for base, channels in rgb_groups.items():
-            if {"red", "green", "blue"}.issubset(channels.keys()):
-                capabilities["rgbGroups"].append({"name": base, "channels": channels})
+        if appid:
+            metadata = self._fetch_steamdb_info(appid)
+            active["steamdb_name"] = metadata.get("name")
+            active["steamdb_url"] = metadata.get("steamdb_url")
 
-        return capabilities
+        if active.get("steamdb_name"):
+            active["display_name"] = active["steamdb_name"]
+        elif active.get("profile"):
+            active["display_name"] = self.game_profiles.get("profiles", {}).get(active["profile"], {}).get("display_name", active["match"])
+        else:
+            active["display_name"] = active["match"]
 
-    def _cycle_led_mode_sync(self, direction: str) -> None:
-        if not self._command_exists("asusctl"):
-            raise ValueError("asusctl not available for LED mode cycling")
-        flag = "--prev-mode" if direction == "prev" else "--next-mode"
-        subprocess.run(["asusctl", "aura", flag], check=False, capture_output=True, text=True)
+        return active
 
-    def _set_led_brightness_sync(self, brightness: int) -> None:
-        brightness = max(0, min(255, int(brightness)))
-        capabilities = self._detect_led_capabilities()
-        if not capabilities["brightnessTargets"]:
-            raise ValueError("No LED brightness targets detected")
-        for target in capabilities["brightnessTargets"]:
-            try:
-                with open(target["path"], "w", encoding="utf-8") as handle:
-                    handle.write(str(brightness))
-            except OSError as error:
-                decky.logger.warning(f"Failed writing LED brightness for {target['name']}: {error}")
+    def _build_game_override_key(self, active_game: Dict[str, Any]) -> str:
+        return f"{active_game['source']}:{active_game['match']}"
 
-    def _set_led_color_sync(self, color: str) -> None:
-        color = color.strip().lstrip("#")
-        if len(color) != 6:
-            raise ValueError("Color must be RRGGBB")
-        red = int(color[0:2], 16)
-        green = int(color[2:4], 16)
-        blue = int(color[4:6], 16)
-        capabilities = self._detect_led_capabilities()
-        if not capabilities["rgbGroups"]:
-            raise ValueError("No RGB LED channels detected")
-        for group in capabilities["rgbGroups"]:
-            values = {"red": red, "green": green, "blue": blue}
-            for channel, path in group["channels"].items():
-                try:
-                    with open(path, "w", encoding="utf-8") as handle:
-                        handle.write(str(values[channel]))
-                except OSError as error:
-                    decky.logger.warning(f"Failed writing LED color for {group['name']}:{channel}: {error}")
+    def _determine_tdp(self, cpu_usage: int, config: Dict[str, Any]) -> int:
+        active_max = int(config["ACTIVE_MAX_TDP"])
+        tdp_values = [
+            int(config["MIN_TDP"]),
+            int(active_max * 1 / 8),
+            int(active_max * 1 / 4),
+            int(active_max * 3 / 8),
+            int(active_max * 1 / 2),
+            int(active_max * 5 / 8),
+            int(active_max * 3 / 4),
+            int(active_max * 7 / 8),
+            active_max,
+        ]
+        thresholds = [0, 10, 20, 30, 40, 50, 60, 70, 80]
+        tdp = int(config["MIN_TDP"])
+        for index, threshold in enumerate(thresholds):
+            adjusted = max(0, min(100, threshold + int(config["ACTIVE_THRESHOLD_OFFSET"])))
+            if cpu_usage > adjusted:
+                tdp = tdp_values[index]
+        return self._align_to_step(tdp, int(config["STEP_TDP"]), int(config["MIN_TDP"]))
+
+    def _apply_power_limit(self, requested_tdp: int, config: Dict[str, Any], external_power: bool) -> int:
+        if external_power:
+            return requested_tdp
+        return min(requested_tdp, int(config["ACTIVE_BATTERY_MAX_TDP"]))
+
+    def _refresh_state(self) -> None:
+        battery = self._read_battery()
+        active_game = self._detect_active_game()
+        config = self._resolve_runtime_config(active_game, battery)
+        self.current_state["enabled"] = bool(self.settings.get("enabled", False))
+        self.current_state["battery"] = battery
+        self.current_state["active_game"] = active_game
+        self.current_state["active_device_profile"] = config.get("DEVICE_PROFILE")
+        self.current_state["resolved_config"] = config
+        self.current_state["hhd"] = self._get_hhd_state()
+        self.current_state["external_power"] = self._is_on_external_power()
+
+    async def _monitor_loop(self) -> None:
+        previous_total, previous_idle = self._read_cpu_times()
+        while True:
+            self._refresh_state()
+            if not self.settings.get("enabled", False):
+                self._candidate_tdp = None
+                self._stable_samples = 0
+                await asyncio.sleep(1)
+                previous_total, previous_idle = self._read_cpu_times()
+                continue
+
+            self._ensure_hhd_compatibility(force=False)
+            config = self.current_state["resolved_config"]
+            await asyncio.sleep(int(config["ACTIVE_MONITOR_INTERVAL"]))
+
+            cpu_usage, previous_total, previous_idle = self._get_cpu_usage(previous_total, previous_idle)
+            self.current_state["cpu_usage"] = cpu_usage
+
+            external_power = self._is_on_external_power()
+            self.current_state["external_power"] = external_power
+            target_tdp = self._determine_tdp(cpu_usage, config)
+            limited_tdp = self._apply_power_limit(target_tdp, config, external_power)
+
+            current_tdp = self.current_state.get("current_tdp")
+            if current_tdp is None:
+                current_tdp = int(config["ACTIVE_DEFAULT_TDP"])
+                self.current_state["current_tdp"] = current_tdp
+
+            if limited_tdp == current_tdp:
+                self._candidate_tdp = limited_tdp
+                self._stable_samples = 0
+                await decky.emit("autotdp_state", self.current_state)
+                continue
+
+            if limited_tdp == self._candidate_tdp:
+                self._stable_samples += 1
+            else:
+                self._candidate_tdp = limited_tdp
+                self._stable_samples = 1
+
+            if self._stable_samples < int(config["ACTIVE_STABLE_SAMPLE_COUNT"]):
+                await decky.emit("autotdp_state", self.current_state)
+                continue
+
+            now = time.time()
+            if now - self._last_adjustment < int(config["ACTIVE_RYZENADJ_DELAY"]):
+                await decky.emit("autotdp_state", self.current_state)
+                continue
+
+            await asyncio.to_thread(self._set_tdp_sync, limited_tdp)
+            self.current_state["current_tdp"] = limited_tdp
+            self._last_adjustment = now
+            await decky.emit("autotdp_state", self.current_state)

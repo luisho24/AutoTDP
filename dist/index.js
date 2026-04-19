@@ -90,41 +90,119 @@ const getState = callable("get_state");
 const setEnabled = callable("set_enabled");
 const setDeviceProfile = callable("set_device_profile");
 const setPerformanceMode = callable("set_performance_mode");
-const setOverride = callable("set_override");
-const setCurrentGameOverride = callable("set_current_game_override");
-const cycleLedMode = callable("cycle_led_mode");
-const setLedBrightness = callable("set_led_brightness");
-const setLedColor = callable("set_led_color");
+const setProfileOverride = callable("set_profile_override");
+const setPluginSettings = callable("set_plugin_settings");
+const updateActiveGameProfile = callable("update_active_game_profile");
+const syncHhdTdp = callable("sync_hhd_tdp");
 function labelize(value) {
     return value
         .split("_")
         .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
         .join(" ");
 }
-function toDropdownOptions(values) {
-    return values.map((value) => ({ data: value.data, label: value.label }));
+function modeOptions(modes) {
+    return modes.map((mode) => ({ data: mode, label: labelize(mode) }));
+}
+function profileOptions(profiles) {
+    return profiles.map((profile) => ({
+        data: profile.key,
+        label: `${profile.display_name}${profile.supported ? "" : " [unsupported]"}`,
+    }));
+}
+function batterySummary(state) {
+    if (!state.battery.present) {
+        return "No battery telemetry";
+    }
+    const bits = [];
+    if (state.battery.percent !== null) {
+        bits.push(`${state.battery.percent}%`);
+    }
+    if (state.battery.status) {
+        bits.push(state.battery.status);
+    }
+    if (state.battery.power_w !== null) {
+        bits.push(`${state.battery.power_w}W`);
+    }
+    if (state.battery.formatted_time_remaining) {
+        bits.push(state.battery.formatted_time_remaining);
+    }
+    return bits.join(" | ");
+}
+function AdvancedModal(props) {
+    const { data, onClose, onRefresh, onState, onError } = props;
+    const activeGame = data.state.active_game;
+    const modes = modeOptions(data.modes);
+    const gameOverrideKey = SP_REACT.useMemo(() => {
+        if (!activeGame) {
+            return null;
+        }
+        return `${activeGame.source}:${activeGame.match}`;
+    }, [activeGame]);
+    const activeGameOverrides = gameOverrideKey ? data.settings.game_overrides?.[gameOverrideKey] ?? {} : {};
+    const [requestedPage, setRequestedPage] = SP_REACT.useState("automation");
+    const [gameMode, setGameMode] = SP_REACT.useState(String(activeGameOverrides.PERFORMANCE_MODE ?? ""));
+    const [gameDefaultTdp, setGameDefaultTdp] = SP_REACT.useState(Number(activeGameOverrides.DEFAULT_TDP ?? data.state.resolved_config.DEFAULT_TDP ?? 10000));
+    const [gameBatteryTdp, setGameBatteryTdp] = SP_REACT.useState(Number(activeGameOverrides.BATTERY_MAX_TDP ?? data.state.resolved_config.BATTERY_MAX_TDP ?? 15000));
+    const [gameDesiredFps, setGameDesiredFps] = SP_REACT.useState(Number(activeGameOverrides.DESIRED_FPS ?? data.settings.desired_fps));
+    const saveGameProfile = async () => {
+        try {
+            const next = await updateActiveGameProfile({
+                PERFORMANCE_MODE: gameMode === "" ? null : gameMode,
+                DEFAULT_TDP: gameDefaultTdp,
+                BATTERY_MAX_TDP: gameBatteryTdp,
+                DESIRED_FPS: gameDesiredFps,
+            });
+            onState(next);
+            onError(null);
+        }
+        catch (caught) {
+            onError(String(caught));
+        }
+    };
+    const clearGameProfile = async () => {
+        try {
+            const next = await updateActiveGameProfile({ clear: true });
+            onState(next);
+            onError(null);
+            setGameMode("");
+        }
+        catch (caught) {
+            onError(String(caught));
+        }
+    };
+    const pages = [
+        {
+            title: "Automation",
+            identifier: "automation",
+            content: (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: "Battery Automation", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Auto battery profile switching", description: "Switch modes automatically on battery, keep manual base mode for AC", checked: data.settings.auto_battery_switch, onChange: async (checked) => onState(await setPluginSettings({ auto_battery_switch: checked })) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "Battery mode", description: "Mode used on battery above low threshold", rgOptions: modes, selectedOption: data.settings.battery_mode, onChange: async (option) => onState(await setPluginSettings({ battery_mode: String(option.data) })) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "Low battery mode", description: "Mode used below low threshold", rgOptions: modes, selectedOption: data.settings.battery_low_mode, onChange: async (option) => onState(await setPluginSettings({ battery_low_mode: String(option.data) })) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Low battery threshold", description: "Percent where low battery mode kicks in", value: data.settings.battery_low_threshold, min: 5, max: 50, step: 1, showValue: true, valueSuffix: "%", editableValue: true, onChange: async (value) => onState(await setPluginSettings({ battery_low_threshold: value })) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Profiles", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Auto-save active game profile", description: "Quick slider changes save to current game when game detected", checked: data.settings.auto_save_game_profiles, onChange: async (checked) => onState(await setPluginSettings({ auto_save_game_profiles: checked })) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Desired FPS target", description: "Experimental. Scales TDP budget heuristically toward target framerate", checked: data.settings.desired_fps_enabled, onChange: async (checked) => onState(await setPluginSettings({ desired_fps_enabled: checked })) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Desired FPS", description: "Experimental target", value: data.settings.desired_fps, min: 30, max: 120, step: 1, showValue: true, valueSuffix: " fps", editableValue: true, disabled: !data.settings.desired_fps_enabled, onChange: async (value) => onState(await setPluginSettings({ desired_fps: value })) }) })] })] })),
+        },
+        {
+            title: "Game Profile",
+            identifier: "game",
+            content: (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: "Active Game", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: activeGame?.display_name ?? "No active game detected" }), SP_JSX.jsx(DFL.PanelSectionRow, { children: activeGame?.steam_appid ? `Steam AppID: ${activeGame.steam_appid}` : "Non-Steam or unknown game" }), activeGame?.steamdb_url ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Open SteamDB", description: activeGame.steamdb_url, onClick: () => DFL.Navigation.NavigateToExternalWeb(activeGame.steamdb_url) }) })) : null] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Current Game Overrides", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "Game mode", description: "Override only this detected game", rgOptions: [{ data: "", label: "Use default/bundled" }, ...modes], selectedOption: gameMode, onChange: (option) => setGameMode(String(option.data)) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Game default TDP", description: "Saved per game", value: gameDefaultTdp, min: Number(data.state.resolved_config.MIN_TDP), max: Number(data.state.resolved_config.MAX_CPU_TDP), step: Number(data.state.resolved_config.STEP_TDP), showValue: true, valueSuffix: " mW", editableValue: true, onChange: (value) => setGameDefaultTdp(value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Game battery max TDP", description: "Saved per game", value: gameBatteryTdp, min: Number(data.state.resolved_config.MIN_TDP), max: Number(data.state.resolved_config.MAX_CPU_TDP), step: Number(data.state.resolved_config.STEP_TDP), showValue: true, valueSuffix: " mW", editableValue: true, onChange: (value) => setGameBatteryTdp(value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Game desired FPS", description: "Experimental per game target", value: gameDesiredFps, min: 30, max: 120, step: 1, showValue: true, valueSuffix: " fps", editableValue: true, onChange: (value) => setGameDesiredFps(value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Save game profile", description: "Persist current game overrides", onClick: () => void saveGameProfile() }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Clear game profile", description: "Remove current game overrides", onClick: () => void clearGameProfile() }) })] })] })),
+        },
+        {
+            title: "HHD",
+            identifier: "hhd",
+            content: (SP_JSX.jsx(SP_JSX.Fragment, { children: SP_JSX.jsxs(DFL.PanelSection, { title: "Handheld Daemon Compatibility", children: [SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Available: ", data.state.hhd.available ? "Yes" : "No"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Service active: ", data.state.hhd.service_active ? "Yes" : "No"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["TDP enabled in HHD: ", data.state.hhd.tdp_enabled === null ? "Unknown" : data.state.hhd.tdp_enabled ? "Yes" : "No"] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "HHD compatibility mode", description: "Disable only HHD TDP control while keeping button and controller features alive", checked: data.settings.hhd_compatibility_mode, onChange: async (checked) => onState(await setPluginSettings({ hhd_compatibility_mode: checked })) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Restore HHD TDP on AutoTDP disable", description: "Turn HHD TDP back on when plugin disables", checked: data.settings.restore_hhd_tdp_on_disable, onChange: async (checked) => onState(await setPluginSettings({ restore_hhd_tdp_on_disable: checked })) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Disable HHD TDP now", description: "Keep HHD button features, stop HHD TDP loop", onClick: async () => onState(await syncHhdTdp(false)) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Enable HHD TDP now", description: "Restore HHD TDP management", onClick: async () => onState(await syncHhdTdp(true)) }) })] }) })),
+        },
+        {
+            title: "Battery",
+            identifier: "battery",
+            content: (SP_JSX.jsx(SP_JSX.Fragment, { children: SP_JSX.jsxs(DFL.PanelSection, { title: "Battery Stats", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: batterySummary(data.state) }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Present: ", data.state.battery.present ? "Yes" : "No"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Charge: ", data.state.battery.percent ?? "Unknown", "%"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Status: ", data.state.battery.status ?? "Unknown"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Power draw: ", data.state.battery.power_w ?? "Unknown", " W"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Energy: ", data.state.battery.energy_wh ?? "Unknown", " Wh"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Time estimate: ", data.state.battery.formatted_time_remaining ?? "Unknown"] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Refresh telemetry", description: "Poll backend again", onClick: () => void onRefresh() }) })] }) })),
+        },
+    ];
+    return (SP_JSX.jsx(DFL.ModalRoot, { closeModal: onClose, onCancel: onClose, bAllowFullSize: true, bDisableBackgroundDismiss: true, children: SP_JSX.jsx(DFL.SidebarNavigation, { title: "AutoTDP Advanced", showTitle: true, pages: pages, page: requestedPage, onPageRequested: setRequestedPage }) }));
 }
 function Content() {
     const [data, setData] = SP_REACT.useState(null);
     const [loading, setLoading] = SP_REACT.useState(true);
     const [error, setError] = SP_REACT.useState(null);
-    const [globalDefaultTdp, setGlobalDefaultTdp] = SP_REACT.useState("");
-    const [globalBatteryTdp, setGlobalBatteryTdp] = SP_REACT.useState("");
-    const [globalMonitorInterval, setGlobalMonitorInterval] = SP_REACT.useState("");
-    const [gameMode, setGameMode] = SP_REACT.useState("");
-    const [gameDefaultTdp, setGameDefaultTdp] = SP_REACT.useState("");
-    const [ledBrightness, setLedBrightnessValue] = SP_REACT.useState("64");
-    const [ledColor, setLedColorValue] = SP_REACT.useState("00AAFF");
     const refresh = async () => {
         try {
             setLoading(true);
             const next = await getState();
             setData(next);
-            setGlobalDefaultTdp(String(next.settings.overrides.DEFAULT_TDP ?? ""));
-            setGlobalBatteryTdp(String(next.settings.overrides.BATTERY_MAX_TDP ?? ""));
-            setGlobalMonitorInterval(String(next.settings.overrides.MONITOR_INTERVAL ?? ""));
-            setGameMode("");
-            setGameDefaultTdp("");
             setError(null);
         }
         catch (caught) {
@@ -135,7 +213,7 @@ function Content() {
         }
     };
     SP_REACT.useEffect(() => {
-        refresh();
+        void refresh();
         const listener = addEventListener("autotdp_state", (state) => {
             setData((previous) => {
                 if (!previous) {
@@ -148,73 +226,35 @@ function Content() {
             removeEventListener("autotdp_state", listener);
         };
     }, []);
-    const currentGameLabel = SP_REACT.useMemo(() => {
-        if (!data?.state.active_game) {
-            return "No game detected";
-        }
-        const activeGame = data.state.active_game;
-        return `${activeGame.display_name ?? activeGame.match} (${activeGame.source}: ${activeGame.match})`;
-    }, [data]);
-    const applyGlobalOverride = async (key, value) => {
-        try {
-            const next = await setOverride(key, value.trim() === "" ? null : value.trim());
-            setData(next);
-            setError(null);
-        }
-        catch (caught) {
-            setError(String(caught));
-        }
-    };
-    const applyGameOverride = async () => {
-        try {
-            const patch = {};
-            patch.PERFORMANCE_MODE = gameMode.trim() === "" ? null : gameMode.trim();
-            patch.DEFAULT_TDP = gameDefaultTdp.trim() === "" ? null : gameDefaultTdp.trim();
-            const next = await setCurrentGameOverride(patch);
-            setData(next);
-            setError(null);
-        }
-        catch (caught) {
-            setError(String(caught));
-        }
-    };
-    const clearGameOverride = async () => {
-        try {
-            const next = await setCurrentGameOverride({ clear: true });
-            setData(next);
-            setGameMode("");
-            setGameDefaultTdp("");
-            setError(null);
-        }
-        catch (caught) {
-            setError(String(caught));
-        }
-    };
     if (loading && !data) {
         return SP_JSX.jsx(DFL.PanelSection, { title: "AutoTDP", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: "Loading..." }) });
     }
     if (!data) {
         return SP_JSX.jsx(DFL.PanelSection, { title: "AutoTDP", children: SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Load failed: ", error] }) });
     }
-    const resolvedConfig = data.state.resolved_config;
-    const led = data.ledCapabilities;
-    const profileOptions = toDropdownOptions(data.profiles.map((profile) => ({
-        data: profile.key,
-        label: `${profile.display_name}${profile.supported ? "" : " [unsupported]"}`,
-    })));
-    const modeOptions = toDropdownOptions(data.modes.map((mode) => ({ data: mode, label: labelize(mode) })));
-    const gameModeOptions = [{ data: "", label: "Use detected/default" }, ...modeOptions];
-    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: "Runtime", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Enable AutoTDP", description: "Main adaptive TDP loop", checked: data.settings.enabled, onChange: async (checked) => setData(await setEnabled(checked)) }) }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["CPU usage: ", data.state.cpu_usage, "%"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Current TDP: ", data.state.current_tdp ?? resolvedConfig.ACTIVE_DEFAULT_TDP, " mW"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Power: ", data.state.external_power === null ? "Unknown" : data.state.external_power ? "External" : "Battery"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Game: ", currentGameLabel] })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Base Profile", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "Device profile", description: "Hardware baseline", rgOptions: profileOptions, selectedOption: data.settings.device_profile, onChange: async (option) => setData(await setDeviceProfile(String(option.data))) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "Mode", description: "Aggressiveness profile", rgOptions: modeOptions, selectedOption: data.settings.performance_mode, onChange: async (option) => setData(await setPerformanceMode(String(option.data))) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Global Overrides", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Default TDP", description: "mW", mustBeNumeric: true, value: globalDefaultTdp, onChange: (event) => setGlobalDefaultTdp(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Save default TDP override", description: "Apply current field", onClick: () => void applyGlobalOverride("DEFAULT_TDP", globalDefaultTdp) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Battery max TDP", description: "mW", mustBeNumeric: true, value: globalBatteryTdp, onChange: (event) => setGlobalBatteryTdp(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Save battery max override", description: "Apply current field", onClick: () => void applyGlobalOverride("BATTERY_MAX_TDP", globalBatteryTdp) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Monitor interval", description: "seconds", mustBeNumeric: true, value: globalMonitorInterval, onChange: (event) => setGlobalMonitorInterval(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Save monitor interval override", description: "Apply current field", onClick: () => void applyGlobalOverride("MONITOR_INTERVAL", globalMonitorInterval) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Current Game Override", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: currentGameLabel }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "Game mode override", description: "For detected current game", rgOptions: gameModeOptions, selectedOption: gameMode, onChange: (option) => setGameMode(String(option.data)) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Game default TDP", description: "mW", mustBeNumeric: true, value: gameDefaultTdp, onChange: (event) => setGameDefaultTdp(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Save current game override", description: "Mode + default TDP", onClick: () => void applyGameOverride() }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Clear current game override", description: "Remove detected game custom values", onClick: () => void clearGameOverride() }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Experimental LED", children: [SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["asusctl: ", led.asusctl ? "yes" : "no"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Brightness targets: ", led.brightnessTargets?.length ?? 0] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["RGB groups: ", led.rgbGroups?.length ?? 0] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Previous LED mode", description: "asusctl aura previous", onClick: async () => setData(await cycleLedMode("prev")) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Next LED mode", description: "asusctl aura next", onClick: async () => setData(await cycleLedMode("next")) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "LED brightness", description: "0-255", mustBeNumeric: true, value: ledBrightness, onChange: (event) => setLedBrightnessValue(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Apply LED brightness", description: "Write brightness to detected LED nodes", onClick: async () => setData(await setLedBrightness(Number(ledBrightness))) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "LED color", description: "RRGGBB", value: ledColor, onChange: (event) => setLedColorValue(event.currentTarget.value.toUpperCase()) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Apply LED color", description: "Write RGB channels if exposed", onClick: async () => setData(await setLedColor(ledColor)) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Resolved Runtime", children: [SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Mode: ", String(resolvedConfig.PERFORMANCE_MODE)] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Device profile: ", data.state.active_device_profile ?? "unknown"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Max TDP: ", String(resolvedConfig.ACTIVE_MAX_TDP), " mW"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Default TDP: ", String(resolvedConfig.ACTIVE_DEFAULT_TDP), " mW"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Battery max TDP: ", String(resolvedConfig.ACTIVE_BATTERY_MAX_TDP), " mW"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Monitor interval: ", String(resolvedConfig.ACTIVE_MONITOR_INTERVAL), " s"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Stable samples: ", String(resolvedConfig.ACTIVE_STABLE_SAMPLE_COUNT)] })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Actions", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Refresh", description: "Reload backend state", onClick: () => void refresh() }) }), error ? SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Error: ", error] }) : null] })] }));
-}
-var index = definePlugin(() => {
-    return {
-        name: "AutoTDP",
-        titleView: SP_JSX.jsx("div", { children: "AutoTDP" }),
-        content: SP_JSX.jsx(Content, {}),
-        icon: SP_JSX.jsx(FaTachometerAlt, {}),
-        onDismount() { },
+    const resolved = data.state.resolved_config;
+    const currentGameLabel = data.state.active_game?.steamdb_name ?? data.state.active_game?.display_name ?? "No game detected";
+    const currentMode = String(resolved.ACTIVE_MODE ?? resolved.PERFORMANCE_MODE ?? data.settings.performance_mode);
+    const profileOpts = profileOptions(data.profiles);
+    const modes = modeOptions(data.modes);
+    const openAdvanced = () => {
+        const modal = DFL.showModal(SP_JSX.jsx(AdvancedModal, { data: data, onClose: () => modal.Close(), onRefresh: refresh, onState: setData, onError: setError }), undefined, {
+            strTitle: "AutoTDP Advanced",
+            bHideMainWindowForPopouts: false,
+            popupWidth: 1200,
+            popupHeight: 900,
+        });
     };
-});
+    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: "Runtime", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Enable AutoTDP", description: "Adaptive TDP loop. HHD compatibility mode will disable only HHD TDP controls, not button helpers.", checked: data.settings.enabled, onChange: async (checked) => setData(await setEnabled(checked)) }) }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Game: ", currentGameLabel] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["CPU usage: ", data.state.cpu_usage, "%"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Current TDP: ", data.state.current_tdp ?? resolved.ACTIVE_DEFAULT_TDP, " mW"] }), SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Effective mode: ", labelize(currentMode)] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: batterySummary(data.state) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Quick Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "Device profile", description: "Hardware baseline", rgOptions: profileOpts, selectedOption: data.settings.device_profile, onChange: async (option) => setData(await setDeviceProfile(String(option.data))) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "Base mode", description: "Preferred AC / manual mode", rgOptions: modes, selectedOption: data.settings.performance_mode, onChange: async (option) => setData(await setPerformanceMode(String(option.data))) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Default TDP", description: data.settings.auto_save_game_profiles && data.state.active_game ? "Auto-saves to current game profile" : "Global override", value: Number(data.state.active_game && data.settings.auto_save_game_profiles ? resolved.DEFAULT_TDP : data.settings.profile_overrides.DEFAULT_TDP ?? resolved.DEFAULT_TDP), min: Number(resolved.MIN_TDP), max: Number(resolved.MAX_CPU_TDP), step: Number(resolved.STEP_TDP), showValue: true, valueSuffix: " mW", editableValue: true, onChange: async (value) => setData(await setProfileOverride("DEFAULT_TDP", value)) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Battery max TDP", description: data.settings.auto_save_game_profiles && data.state.active_game ? "Auto-saves to current game profile" : "Global override", value: Number(data.state.active_game && data.settings.auto_save_game_profiles ? resolved.BATTERY_MAX_TDP : data.settings.profile_overrides.BATTERY_MAX_TDP ?? resolved.BATTERY_MAX_TDP), min: Number(resolved.MIN_TDP), max: Number(resolved.MAX_CPU_TDP), step: Number(resolved.STEP_TDP), showValue: true, valueSuffix: " mW", editableValue: true, onChange: async (value) => setData(await setProfileOverride("BATTERY_MAX_TDP", value)) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Monitor interval", description: data.settings.auto_save_game_profiles && data.state.active_game ? "Auto-saves to current game profile" : "Global override", value: Number(data.settings.profile_overrides.MONITOR_INTERVAL ?? resolved.MONITOR_INTERVAL), min: 1, max: 10, step: 1, showValue: true, valueSuffix: " s", editableValue: true, onChange: async (value) => setData(await setProfileOverride("MONITOR_INTERVAL", value)) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "Desired FPS", description: "Experimental heuristic target", value: data.settings.desired_fps, min: 30, max: 120, step: 1, showValue: true, valueSuffix: " fps", editableValue: true, disabled: !data.settings.desired_fps_enabled, onChange: async (value) => setData(await setPluginSettings({ desired_fps: value })) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Desired FPS enabled", description: "Experimental. May improve battery by cutting excess TDP headroom", checked: data.settings.desired_fps_enabled, onChange: async (checked) => setData(await setPluginSettings({ desired_fps_enabled: checked })) }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Actions", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Open advanced editor", description: "Full-size profile editor, HHD, battery, SteamDB info", onClick: openAdvanced }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: "Refresh", description: "Poll backend state", onClick: () => void refresh() }) }), error ? SP_JSX.jsxs(DFL.PanelSectionRow, { children: ["Error: ", error] }) : null] })] }));
+}
+var index = definePlugin(() => ({
+    name: "AutoTDP",
+    titleView: SP_JSX.jsx("div", { children: "AutoTDP" }),
+    content: SP_JSX.jsx(Content, {}),
+    icon: SP_JSX.jsx(FaTachometerAlt, {}),
+    onDismount() { },
+    alwaysRender: false,
+}));
 
 export { index as default };
 //# sourceMappingURL=index.js.map
