@@ -656,8 +656,14 @@ function Content() {
     setQuickDefaultTdp(Number(data.state.active_game && data.settings.auto_save_game_profiles ? resolved.DEFAULT_TDP : data.settings.profile_overrides.DEFAULT_TDP ?? resolved.DEFAULT_TDP));
     setQuickBatteryTdp(Number(data.state.active_game && data.settings.auto_save_game_profiles ? resolved.BATTERY_MAX_TDP : data.settings.profile_overrides.BATTERY_MAX_TDP ?? resolved.BATTERY_MAX_TDP));
     setQuickMonitorInterval(Number(data.settings.profile_overrides.MONITOR_INTERVAL ?? resolved.MONITOR_INTERVAL));
+  }, [data?.settings.auto_save_game_profiles, data?.settings.profile_overrides.BATTERY_MAX_TDP, data?.settings.profile_overrides.DEFAULT_TDP, data?.settings.profile_overrides.MONITOR_INTERVAL, data?.state.active_game, data?.state.resolved_config]);
+
+  useEffect(() => {
+    if (!data) {
+      return;
+    }
     setQuickDesiredFps(Number(data.settings.desired_fps));
-  }, [data?.settings.auto_save_game_profiles, data?.settings.desired_fps, data?.settings.profile_overrides.BATTERY_MAX_TDP, data?.settings.profile_overrides.DEFAULT_TDP, data?.settings.profile_overrides.MONITOR_INTERVAL, data?.state.active_game, data?.state.resolved_config]);
+  }, [data?.settings.desired_fps]);
 
   if (loading && !data) {
     return <PanelSection title="AutoTDP"><PanelSectionRow>Loading...</PanelSectionRow></PanelSection>;
@@ -697,50 +703,42 @@ function Content() {
   return (
     <>
       <PanelSection title="Overview">
-        <PanelSectionRow>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, width: "100%" }}>
-            <div style={summaryCardStyle("rgba(68, 200, 255, 0.45)")}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <FaGamepad />
-                <strong>{currentGameLabel}</strong>
-              </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <span style={chipStyle("rgba(68, 200, 255, 0.18)")}>{contextLabel(data.state)}</span>
-                <span style={chipStyle("rgba(255, 215, 0, 0.18)")}>{labelize(currentMode)}</span>
-              </div>
-            </div>
-            <div style={summaryCardStyle("rgba(120, 255, 160, 0.45)")}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <FaBullseye />
-                <strong>{liveFps}</strong>
-              </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <span style={chipStyle("rgba(120, 255, 160, 0.18)")}>Target {targetFps} fps</span>
-                {data.state.fps_target_unreachable ? <span style={chipStyle("rgba(255, 120, 120, 0.18)")}>Auto-capped</span> : null}
-              </div>
-            </div>
-            <div style={summaryCardStyle("rgba(255, 180, 80, 0.45)")}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <FaTachometerAlt />
-                <strong>{data.state.current_tdp ?? resolved.ACTIVE_DEFAULT_TDP} mW</strong>
-              </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>CPU {data.state.cpu_usage}%</span>
-                <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>{data.state.ryzenadj.active_source ? labelize(data.state.ryzenadj.active_source) : "No ryzenadj"}</span>
-              </div>
-            </div>
-            <div style={summaryCardStyle("rgba(170, 120, 255, 0.45)")}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <FaBatteryHalf />
-                <strong>{batterySummary(data.state)}</strong>
-              </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <span style={chipStyle("rgba(170, 120, 255, 0.18)")}>{data.state.external_power ? "Plugged in" : "Battery / unknown"}</span>
-                <span style={chipStyle("rgba(170, 120, 255, 0.18)")}>{data.state.focus ?? "No focus data"}</span>
-              </div>
+        <SelectableInfoRow label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaGamepad /> Current activity</span>}>
+          <div style={summaryCardStyle("rgba(68, 200, 255, 0.45)")}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{currentGameLabel}</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <span style={chipStyle("rgba(68, 200, 255, 0.18)")}>{contextLabel(data.state)}</span>
+              <span style={chipStyle("rgba(255, 215, 0, 0.18)")}>{labelize(currentMode)}</span>
             </div>
           </div>
-        </PanelSectionRow>
+        </SelectableInfoRow>
+        <SelectableInfoRow label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaBullseye /> FPS target</span>}>
+          <div style={summaryCardStyle("rgba(120, 255, 160, 0.45)")}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{liveFps}</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <span style={chipStyle("rgba(120, 255, 160, 0.18)")}>Target {targetFps} fps</span>
+              {data.state.fps_target_unreachable ? <span style={chipStyle("rgba(255, 120, 120, 0.18)")}>Auto-capped</span> : null}
+            </div>
+          </div>
+        </SelectableInfoRow>
+        <SelectableInfoRow label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaTachometerAlt /> Power state</span>}>
+          <div style={summaryCardStyle("rgba(255, 180, 80, 0.45)")}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{data.state.current_tdp ?? resolved.ACTIVE_DEFAULT_TDP} mW</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>CPU {data.state.cpu_usage}%</span>
+              <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>{data.state.ryzenadj.active_source ? labelize(data.state.ryzenadj.active_source) : "No ryzenadj"}</span>
+            </div>
+          </div>
+        </SelectableInfoRow>
+        <SelectableInfoRow label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaBatteryHalf /> Battery</span>}>
+          <div style={summaryCardStyle("rgba(170, 120, 255, 0.45)")}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{batterySummary(data.state)}</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <span style={chipStyle("rgba(170, 120, 255, 0.18)")}>{data.state.external_power ? "Plugged in" : "Battery / unknown"}</span>
+              <span style={chipStyle("rgba(170, 120, 255, 0.18)")}>{data.state.focus ?? "No focus data"}</span>
+            </div>
+          </div>
+        </SelectableInfoRow>
       </PanelSection>
 
       <PanelSection title="Runtime Control">
@@ -839,11 +837,11 @@ function Content() {
             valueSuffix=" fps"
             editableValue
             disabled={!data.settings.desired_fps_enabled}
-            onChange={(value) => setQuickDesiredFps(value)}
+            onChange={async (value) => {
+              setQuickDesiredFps(value);
+              setData(await setPluginSettings({ desired_fps: value }));
+            }}
           />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem label="Apply desired FPS" description="Commit current slider value" onClick={async () => setData(await setPluginSettings({ desired_fps: quickDesiredFps }))} />
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
@@ -865,10 +863,10 @@ function Content() {
 
       <PanelSection title="Actions">
         <PanelSectionRow>
-          <ButtonItem label="Open advanced editor" description="Full-size profile editor, HHD, battery, SteamDB info" onClick={openAdvanced} />
+          <ButtonItem label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaDesktop /> Open advanced editor</span>} description="Profiles, Steam UI, HHD, RyzenAdj, battery, SteamDB" onClick={openAdvanced} />
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem label="Refresh" description="Poll backend state" onClick={() => void refresh()} />
+          <ButtonItem label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaBolt /> Refresh status</span>} description="Reload backend state and telemetry" onClick={() => void refresh()} />
         </PanelSectionRow>
         {error ? <PanelSectionRow>Error: {error}</PanelSectionRow> : null}
       </PanelSection>
