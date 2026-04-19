@@ -1,4 +1,12 @@
 import { addEventListener, callable, definePlugin, removeEventListener } from "@decky/api";
+import {
+  ButtonItem,
+  DropdownItem,
+  PanelSection,
+  PanelSectionRow,
+  TextField,
+  ToggleField,
+} from "@decky/ui";
 import { useEffect, useMemo, useState } from "react";
 import { FaTachometerAlt } from "react-icons/fa";
 
@@ -60,44 +68,8 @@ function labelize(value: string): string {
     .join(" ");
 }
 
-function rowStyle(): React.CSSProperties {
-  return {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: "8px",
-    marginBottom: "8px",
-  };
-}
-
-function cardStyle(): React.CSSProperties {
-  return {
-    border: "1px solid rgba(255,255,255,0.12)",
-    borderRadius: "10px",
-    padding: "12px",
-    marginBottom: "12px",
-  };
-}
-
-function inputStyle(): React.CSSProperties {
-  return {
-    width: "100%",
-    padding: "8px",
-    borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "rgba(0,0,0,0.2)",
-    color: "white",
-  };
-}
-
-function buttonStyle(): React.CSSProperties {
-  return {
-    padding: "8px 10px",
-    borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.2)",
-    background: "rgba(255,255,255,0.08)",
-    color: "white",
-  };
+function toDropdownOptions(values: Array<{ data: string; label: string }>) {
+  return values.map((value) => ({ data: value.data, label: value.label }));
 }
 
 function Content() {
@@ -110,7 +82,7 @@ function Content() {
   const [gameMode, setGameMode] = useState("");
   const [gameDefaultTdp, setGameDefaultTdp] = useState("");
   const [ledBrightness, setLedBrightnessValue] = useState("64");
-  const [ledColor, setLedColorValue] = useState("00aaff");
+  const [ledColor, setLedColorValue] = useState("00AAFF");
 
   const refresh = async () => {
     try {
@@ -189,151 +161,226 @@ function Content() {
   };
 
   if (loading && !data) {
-    return <div style={{ padding: 16 }}>Loading AutoTDP...</div>;
+    return <PanelSection title="AutoTDP"><PanelSectionRow>Loading...</PanelSectionRow></PanelSection>;
   }
 
   if (!data) {
-    return <div style={{ padding: 16 }}>Failed loading plugin state: {error}</div>;
+    return <PanelSection title="AutoTDP"><PanelSectionRow>Load failed: {error}</PanelSectionRow></PanelSection>;
   }
 
   const resolvedConfig = data.state.resolved_config;
   const led = data.ledCapabilities;
 
+  const profileOptions = toDropdownOptions(
+    data.profiles.map((profile) => ({
+      data: profile.key,
+      label: `${profile.display_name}${profile.supported ? "" : " [unsupported]"}`,
+    })),
+  );
+
+  const modeOptions = toDropdownOptions(
+    data.modes.map((mode) => ({ data: mode, label: labelize(mode) })),
+  );
+
+  const gameModeOptions = [{ data: "", label: "Use detected/default" }, ...modeOptions];
+
   return (
-    <div style={{ padding: 16, color: "white" }}>
-      <div style={cardStyle()}>
-        <div style={rowStyle()}>
-          <strong>AutoTDP</strong>
-          <label>
-            <input
-              type="checkbox"
-              checked={data.settings.enabled}
-              onChange={async (event) => setData(await setEnabled(event.target.checked))}
-            />{" "}
-            Enabled
-          </label>
-        </div>
-        <div>CPU: {data.state.cpu_usage}%</div>
-        <div>Current TDP: {data.state.current_tdp ?? resolvedConfig.ACTIVE_DEFAULT_TDP} mW</div>
-        <div>Power: {data.state.external_power === null ? "Unknown" : data.state.external_power ? "External" : "Battery"}</div>
-        <div>Game: {currentGameLabel}</div>
-      </div>
+    <>
+      <PanelSection title="Runtime">
+        <PanelSectionRow>
+          <ToggleField
+            label="Enable AutoTDP"
+            description="Main adaptive TDP loop"
+            checked={data.settings.enabled}
+            onChange={async (checked) => setData(await setEnabled(checked))}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>CPU usage: {data.state.cpu_usage}%</PanelSectionRow>
+        <PanelSectionRow>Current TDP: {data.state.current_tdp ?? resolvedConfig.ACTIVE_DEFAULT_TDP} mW</PanelSectionRow>
+        <PanelSectionRow>
+          Power: {data.state.external_power === null ? "Unknown" : data.state.external_power ? "External" : "Battery"}
+        </PanelSectionRow>
+        <PanelSectionRow>Game: {currentGameLabel}</PanelSectionRow>
+      </PanelSection>
 
-      <div style={cardStyle()}>
-        <strong>Base Profile</strong>
-        <div style={{ marginTop: 8 }}>
-          <div style={{ marginBottom: 6 }}>Device profile</div>
-          <select
-            style={inputStyle()}
-            value={data.settings.device_profile}
-            onChange={async (event) => setData(await setDeviceProfile(event.target.value))}
-          >
-            {data.profiles.map((profile) => (
-              <option key={profile.key} value={profile.key} disabled={!profile.supported}>
-                {profile.display_name}{profile.supported ? "" : " [unsupported]"}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <div style={{ marginBottom: 6 }}>Mode</div>
-          <select
-            style={inputStyle()}
-            value={data.settings.performance_mode}
-            onChange={async (event) => setData(await setPerformanceMode(event.target.value))}
-          >
-            {data.modes.map((mode) => (
-              <option key={mode} value={mode}>
-                {labelize(mode)}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
+      <PanelSection title="Base Profile">
+        <PanelSectionRow>
+          <DropdownItem
+            label="Device profile"
+            description="Hardware baseline"
+            rgOptions={profileOptions}
+            selectedOption={data.settings.device_profile}
+            onChange={async (option) => setData(await setDeviceProfile(String(option.data)))}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <DropdownItem
+            label="Mode"
+            description="Aggressiveness profile"
+            rgOptions={modeOptions}
+            selectedOption={data.settings.performance_mode}
+            onChange={async (option) => setData(await setPerformanceMode(String(option.data)))}
+          />
+        </PanelSectionRow>
+      </PanelSection>
 
-      <div style={cardStyle()}>
-        <strong>Global Overrides</strong>
-        <div style={{ marginTop: 8 }}>
-          <div style={{ marginBottom: 6 }}>Default TDP</div>
-          <input style={inputStyle()} value={globalDefaultTdp} onChange={(event) => setGlobalDefaultTdp(event.target.value)} />
-          <button style={{ ...buttonStyle(), marginTop: 8 }} onClick={() => applyGlobalOverride("DEFAULT_TDP", globalDefaultTdp)}>
-            Save default TDP override
-          </button>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <div style={{ marginBottom: 6 }}>Battery max TDP</div>
-          <input style={inputStyle()} value={globalBatteryTdp} onChange={(event) => setGlobalBatteryTdp(event.target.value)} />
-          <button style={{ ...buttonStyle(), marginTop: 8 }} onClick={() => applyGlobalOverride("BATTERY_MAX_TDP", globalBatteryTdp)}>
-            Save battery TDP override
-          </button>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <div style={{ marginBottom: 6 }}>Monitor interval</div>
-          <input style={inputStyle()} value={globalMonitorInterval} onChange={(event) => setGlobalMonitorInterval(event.target.value)} />
-          <button style={{ ...buttonStyle(), marginTop: 8 }} onClick={() => applyGlobalOverride("MONITOR_INTERVAL", globalMonitorInterval)}>
-            Save monitor interval override
-          </button>
-        </div>
-      </div>
+      <PanelSection title="Global Overrides">
+        <PanelSectionRow>
+          <TextField
+            label="Default TDP"
+            description="mW"
+            mustBeNumeric
+            value={globalDefaultTdp}
+            onChange={(event) => setGlobalDefaultTdp(event.currentTarget.value)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            label="Save default TDP override"
+            description="Apply current field"
+            onClick={() => void applyGlobalOverride("DEFAULT_TDP", globalDefaultTdp)}
+          />
+        </PanelSectionRow>
 
-      <div style={cardStyle()}>
-        <strong>Current Game Override</strong>
-        <div style={{ marginTop: 8, marginBottom: 6 }}>{currentGameLabel}</div>
-        <div style={{ marginBottom: 6 }}>Mode</div>
-        <select style={inputStyle()} value={gameMode} onChange={(event) => setGameMode(event.target.value)}>
-          <option value="">Use detected/default</option>
-          {data.modes.map((mode) => (
-            <option key={mode} value={mode}>
-              {labelize(mode)}
-            </option>
-          ))}
-        </select>
-        <div style={{ marginTop: 8, marginBottom: 6 }}>Default TDP</div>
-        <input style={inputStyle()} value={gameDefaultTdp} onChange={(event) => setGameDefaultTdp(event.target.value)} />
-        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-          <button style={buttonStyle()} onClick={applyGameOverride}>Save current game override</button>
-          <button style={buttonStyle()} onClick={clearGameOverride}>Clear current game override</button>
-        </div>
-      </div>
+        <PanelSectionRow>
+          <TextField
+            label="Battery max TDP"
+            description="mW"
+            mustBeNumeric
+            value={globalBatteryTdp}
+            onChange={(event) => setGlobalBatteryTdp(event.currentTarget.value)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            label="Save battery max override"
+            description="Apply current field"
+            onClick={() => void applyGlobalOverride("BATTERY_MAX_TDP", globalBatteryTdp)}
+          />
+        </PanelSectionRow>
 
-      <div style={cardStyle()}>
-        <strong>Experimental LED</strong>
-        <div style={{ marginTop: 8 }}>asusctl: {led.asusctl ? "yes" : "no"}</div>
-        <div>Brightness targets: {led.brightnessTargets?.length ?? 0}</div>
-        <div>RGB groups: {led.rgbGroups?.length ?? 0}</div>
-        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-          <button style={buttonStyle()} onClick={async () => setData(await cycleLedMode("prev"))}>Prev LED mode</button>
-          <button style={buttonStyle()} onClick={async () => setData(await cycleLedMode("next"))}>Next LED mode</button>
-        </div>
-        <div style={{ marginTop: 8, marginBottom: 6 }}>Brightness (0-255)</div>
-        <input style={inputStyle()} value={ledBrightness} onChange={(event) => setLedBrightnessValue(event.target.value)} />
-        <button style={{ ...buttonStyle(), marginTop: 8 }} onClick={async () => setData(await setLedBrightness(Number(ledBrightness)))}>
-          Apply LED brightness
-        </button>
-        <div style={{ marginTop: 8, marginBottom: 6 }}>RGB color (RRGGBB)</div>
-        <input style={inputStyle()} value={ledColor} onChange={(event) => setLedColorValue(event.target.value)} />
-        <button style={{ ...buttonStyle(), marginTop: 8 }} onClick={async () => setData(await setLedColor(ledColor))}>
-          Apply LED color
-        </button>
-      </div>
+        <PanelSectionRow>
+          <TextField
+            label="Monitor interval"
+            description="seconds"
+            mustBeNumeric
+            value={globalMonitorInterval}
+            onChange={(event) => setGlobalMonitorInterval(event.currentTarget.value)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            label="Save monitor interval override"
+            description="Apply current field"
+            onClick={() => void applyGlobalOverride("MONITOR_INTERVAL", globalMonitorInterval)}
+          />
+        </PanelSectionRow>
+      </PanelSection>
 
-      <div style={cardStyle()}>
-        <strong>Resolved Runtime</strong>
-        <div>Mode: {String(resolvedConfig.PERFORMANCE_MODE)}</div>
-        <div>Device profile: {data.state.active_device_profile ?? "unknown"}</div>
-        <div>Max TDP: {String(resolvedConfig.ACTIVE_MAX_TDP)} mW</div>
-        <div>Default TDP: {String(resolvedConfig.ACTIVE_DEFAULT_TDP)} mW</div>
-        <div>Battery max TDP: {String(resolvedConfig.ACTIVE_BATTERY_MAX_TDP)} mW</div>
-        <div>Monitor interval: {String(resolvedConfig.ACTIVE_MONITOR_INTERVAL)} s</div>
-        <div>Stable samples: {String(resolvedConfig.ACTIVE_STABLE_SAMPLE_COUNT)}</div>
-      </div>
+      <PanelSection title="Current Game Override">
+        <PanelSectionRow>{currentGameLabel}</PanelSectionRow>
+        <PanelSectionRow>
+          <DropdownItem
+            label="Game mode override"
+            description="For detected current game"
+            rgOptions={gameModeOptions}
+            selectedOption={gameMode}
+            onChange={(option) => setGameMode(String(option.data))}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <TextField
+            label="Game default TDP"
+            description="mW"
+            mustBeNumeric
+            value={gameDefaultTdp}
+            onChange={(event) => setGameDefaultTdp(event.currentTarget.value)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            label="Save current game override"
+            description="Mode + default TDP"
+            onClick={() => void applyGameOverride()}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            label="Clear current game override"
+            description="Remove detected game custom values"
+            onClick={() => void clearGameOverride()}
+          />
+        </PanelSectionRow>
+      </PanelSection>
 
-      <div style={{ display: "flex", gap: 8 }}>
-        <button style={buttonStyle()} onClick={refresh}>Refresh</button>
-      </div>
+      <PanelSection title="Experimental LED">
+        <PanelSectionRow>asusctl: {led.asusctl ? "yes" : "no"}</PanelSectionRow>
+        <PanelSectionRow>Brightness targets: {led.brightnessTargets?.length ?? 0}</PanelSectionRow>
+        <PanelSectionRow>RGB groups: {led.rgbGroups?.length ?? 0}</PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            label="Previous LED mode"
+            description="asusctl aura previous"
+            onClick={async () => setData(await cycleLedMode("prev"))}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            label="Next LED mode"
+            description="asusctl aura next"
+            onClick={async () => setData(await cycleLedMode("next"))}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <TextField
+            label="LED brightness"
+            description="0-255"
+            mustBeNumeric
+            value={ledBrightness}
+            onChange={(event) => setLedBrightnessValue(event.currentTarget.value)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            label="Apply LED brightness"
+            description="Write brightness to detected LED nodes"
+            onClick={async () => setData(await setLedBrightness(Number(ledBrightness)))}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <TextField
+            label="LED color"
+            description="RRGGBB"
+            value={ledColor}
+            onChange={(event) => setLedColorValue(event.currentTarget.value.toUpperCase())}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            label="Apply LED color"
+            description="Write RGB channels if exposed"
+            onClick={async () => setData(await setLedColor(ledColor))}
+          />
+        </PanelSectionRow>
+      </PanelSection>
 
-      {error ? <div style={{ marginTop: 12, color: "#ff8c8c" }}>{error}</div> : null}
-    </div>
+      <PanelSection title="Resolved Runtime">
+        <PanelSectionRow>Mode: {String(resolvedConfig.PERFORMANCE_MODE)}</PanelSectionRow>
+        <PanelSectionRow>Device profile: {data.state.active_device_profile ?? "unknown"}</PanelSectionRow>
+        <PanelSectionRow>Max TDP: {String(resolvedConfig.ACTIVE_MAX_TDP)} mW</PanelSectionRow>
+        <PanelSectionRow>Default TDP: {String(resolvedConfig.ACTIVE_DEFAULT_TDP)} mW</PanelSectionRow>
+        <PanelSectionRow>Battery max TDP: {String(resolvedConfig.ACTIVE_BATTERY_MAX_TDP)} mW</PanelSectionRow>
+        <PanelSectionRow>Monitor interval: {String(resolvedConfig.ACTIVE_MONITOR_INTERVAL)} s</PanelSectionRow>
+        <PanelSectionRow>Stable samples: {String(resolvedConfig.ACTIVE_STABLE_SAMPLE_COUNT)}</PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Actions">
+        <PanelSectionRow>
+          <ButtonItem label="Refresh" description="Reload backend state" onClick={() => void refresh()} />
+        </PanelSectionRow>
+        {error ? <PanelSectionRow>Error: {error}</PanelSectionRow> : null}
+      </PanelSection>
+    </>
   );
 }
 
