@@ -165,6 +165,31 @@ function contextLabel(state: RuntimeState): string {
   return "Unknown";
 }
 
+function getSteamClientGameMetadata(appId: string | null | undefined) {
+  if (!appId) {
+    return null;
+  }
+  const parsed = Number(appId);
+  if (!Number.isFinite(parsed) || !(window as any).appStore?.GetAppOverviewByAppID) {
+    return null;
+  }
+
+  const app = (window as any).appStore.GetAppOverviewByAppID(parsed);
+  if (!app) {
+    return null;
+  }
+
+  const appStore = (window as any).appStore;
+  const imageUrl = appStore.GetLandscapeImageURLForApp?.(app) || appStore.GetCachedLandscapeImageURLForApp?.(app) || null;
+  const verticalImageUrl = appStore.GetVerticalCapsuleURLForApp?.(app) || appStore.GetCachedVerticalImageURLForApp?.(app) || null;
+
+  return {
+    name: app.display_name || null,
+    imageUrl,
+    verticalImageUrl,
+  };
+}
+
 function chipStyle(background: string): React.CSSProperties {
   return {
     background,
@@ -680,8 +705,9 @@ function Content() {
   }
 
   const resolved = data.state.resolved_config;
-  const currentGameLabel = data.state.active_game?.steamdb_name ?? data.state.active_game?.display_name ?? "No game detected";
-  const currentGameArt = data.state.active_game?.library_image_url ?? data.state.active_game?.image_url ?? null;
+  const steamClientMetadata = getSteamClientGameMetadata(data.state.active_game?.steam_appid);
+  const currentGameLabel = steamClientMetadata?.name ?? data.state.active_game?.steamdb_name ?? data.state.active_game?.display_name ?? "No game detected";
+  const currentGameArt = steamClientMetadata?.imageUrl ?? steamClientMetadata?.verticalImageUrl ?? data.state.active_game?.library_image_url ?? data.state.active_game?.image_url ?? null;
   const currentMode = String(resolved.ACTIVE_MODE ?? resolved.PERFORMANCE_MODE ?? data.settings.performance_mode);
   const profileOpts = profileOptions(data.profiles);
   const modes = modeOptions(data.modes);
@@ -752,7 +778,7 @@ function Content() {
             <div style={{ fontWeight: 700, marginBottom: 6 }}>{batterySummary(data.state)}</div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               <span style={chipStyle("rgba(170, 120, 255, 0.18)")}>{data.state.external_power ? "Plugged in" : "Battery / unknown"}</span>
-              <span style={chipStyle("rgba(170, 120, 255, 0.18)")}>{data.state.focus ?? "No focus data"}</span>
+              <span style={chipStyle("rgba(170, 120, 255, 0.18)")}>{data.state.focus ? `Focus: ${data.state.focus}` : "Focus unknown"}</span>
             </div>
           </div>
         </SelectableInfoRow>
@@ -804,14 +830,14 @@ function Content() {
               const clamped = Math.min(value, quickDefaultTdp, quickMaxTdp);
               setQuickMinTdp(clamped);
               const next = await setProfileOverride("MIN_TDP", clamped);
-              applyData(next, false);
+              applyData(next);
             }}
           />
         </PanelSectionRow>
         <PanelSectionRow>
           <SliderField
             label="Default TDP"
-            description={data.settings.auto_save_game_profiles && data.state.active_game ? "Quick edit for active game profile" : "Default target while gaming"}
+            description={data.settings.auto_save_game_profiles && data.state.active_game ? "Active game profile target" : "Default target while gaming"}
             value={quickDefaultTdp}
             min={quickMinTdp}
             max={quickMaxTdp}
@@ -823,7 +849,7 @@ function Content() {
               const clamped = Math.max(quickMinTdp, Math.min(value, quickMaxTdp));
               setQuickDefaultTdp(clamped);
               const next = await setProfileOverride("DEFAULT_TDP", clamped);
-              applyData(next, false);
+              applyData(next);
             }}
           />
         </PanelSectionRow>
@@ -842,7 +868,7 @@ function Content() {
               const clamped = Math.max(value, quickDefaultTdp, quickMinTdp);
               setQuickMaxTdp(clamped);
               const next = await setProfileOverride("MAX_CPU_TDP", clamped);
-              applyData(next, false);
+              applyData(next);
             }}
           />
         </PanelSectionRow>
@@ -895,7 +921,7 @@ function Content() {
             onChange={async (value) => {
               setQuickMonitorInterval(value);
               const next = await setProfileOverride("MONITOR_INTERVAL", value);
-              applyData(next, false);
+              applyData(next);
             }}
           />
         </PanelSectionRow>
