@@ -719,6 +719,7 @@ function Content() {
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   <span style={chipStyle("rgba(68, 200, 255, 0.18)")}>{contextLabel(data.state)}</span>
                   <span style={chipStyle("rgba(255, 215, 0, 0.18)")}>{labelize(currentMode)}</span>
+                  {data.state.active_game?.steam_appid ? <span style={chipStyle("rgba(255, 255, 255, 0.12)")}>Steam</span> : null}
                 </div>
               </div>
             </div>
@@ -739,8 +740,9 @@ function Content() {
             <div style={{ fontWeight: 700, marginBottom: 6 }}>{data.state.current_tdp ?? resolved.ACTIVE_DEFAULT_TDP} mW</div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>CPU {data.state.cpu_usage}%</span>
-              <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>Min {Number(resolved.MIN_TDP)} mW</span>
-              <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>Ceiling {Number(resolved.MAX_CPU_TDP)} mW</span>
+              <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>Min {quickMinTdp} mW</span>
+              <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>Default {quickDefaultTdp} mW</span>
+              <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>Ceiling {quickMaxTdp} mW</span>
               <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>{data.state.ryzenadj.active_source ? labelize(data.state.ryzenadj.active_source) : "No ryzenadj"}</span>
             </div>
           </div>
@@ -802,7 +804,7 @@ function Content() {
               const clamped = Math.min(value, quickDefaultTdp, quickMaxTdp);
               setQuickMinTdp(clamped);
               const next = await setProfileOverride("MIN_TDP", clamped);
-              applyData(next);
+              applyData(next, false);
             }}
           />
         </PanelSectionRow>
@@ -821,7 +823,7 @@ function Content() {
               const clamped = Math.max(quickMinTdp, Math.min(value, quickMaxTdp));
               setQuickDefaultTdp(clamped);
               const next = await setProfileOverride("DEFAULT_TDP", clamped);
-              applyData(next);
+              applyData(next, false);
             }}
           />
         </PanelSectionRow>
@@ -840,7 +842,7 @@ function Content() {
               const clamped = Math.max(value, quickDefaultTdp, quickMinTdp);
               setQuickMaxTdp(clamped);
               const next = await setProfileOverride("MAX_CPU_TDP", clamped);
-              applyData(next);
+              applyData(next, false);
             }}
           />
         </PanelSectionRow>

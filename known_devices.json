@@ -149,14 +149,14 @@
       "supported": true,
       "notes": "Higher ceiling profile for Ryzen Z1 Extreme handhelds.",
       "config": {
-        "MIN_TDP": 8000,
-        "DEFAULT_TDP": 15000,
+        "MIN_TDP": 5000,
+        "DEFAULT_TDP": 12000,
         "MAX_CPU_TDP": 30000,
         "STEP_TDP": 1000,
         "RYZENADJ_DELAY": 4,
         "MONITOR_INTERVAL": 4,
         "STABLE_SAMPLE_COUNT": 2,
-        "BATTERY_MAX_TDP": 22000
+        "BATTERY_MAX_TDP": 18000
       }
     },
     "rog_ally_z1": {
@@ -169,14 +169,14 @@
       "supported": true,
       "notes": "Slightly lower ceiling than the Z1 Extreme model.",
       "config": {
-        "MIN_TDP": 7000,
-        "DEFAULT_TDP": 12000,
+        "MIN_TDP": 5000,
+        "DEFAULT_TDP": 10000,
         "MAX_CPU_TDP": 20000,
         "STEP_TDP": 1000,
         "RYZENADJ_DELAY": 4,
         "MONITOR_INTERVAL": 4,
         "STABLE_SAMPLE_COUNT": 2,
-        "BATTERY_MAX_TDP": 16000
+        "BATTERY_MAX_TDP": 15000
       }
     },
     "legion_go_z1_extreme": {
@@ -189,14 +189,14 @@
       "supported": true,
       "notes": "Targets the larger Legion Go chassis and battery while keeping battery mode under control.",
       "config": {
-        "MIN_TDP": 8000,
-        "DEFAULT_TDP": 15000,
+        "MIN_TDP": 5000,
+        "DEFAULT_TDP": 12000,
         "MAX_CPU_TDP": 30000,
         "STEP_TDP": 1000,
         "RYZENADJ_DELAY": 4,
         "MONITOR_INTERVAL": 4,
         "STABLE_SAMPLE_COUNT": 2,
-        "BATTERY_MAX_TDP": 20000
+        "BATTERY_MAX_TDP": 18000
       }
     },
     "legion_go_z1": {
@@ -207,14 +207,14 @@
       ],
       "supported": true,
       "config": {
-        "MIN_TDP": 7000,
-        "DEFAULT_TDP": 12000,
+        "MIN_TDP": 5000,
+        "DEFAULT_TDP": 10000,
         "MAX_CPU_TDP": 20000,
         "STEP_TDP": 1000,
         "RYZENADJ_DELAY": 4,
         "MONITOR_INTERVAL": 4,
         "STABLE_SAMPLE_COUNT": 2,
-        "BATTERY_MAX_TDP": 16000
+        "BATTERY_MAX_TDP": 15000
       }
     },
     "gpd_win_4_7840u": {
