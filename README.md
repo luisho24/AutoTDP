@@ -41,6 +41,42 @@ Install these commands on your system:
 
 Release notes are tracked in `CHANGELOG.md` so future GitHub releases can reuse the same version history.
 
+## Decky Plugin
+
+Repo now includes Decky Loader plugin build alongside original shell script.
+
+Plugin files:
+
+- `plugin.json`
+- `package.json`
+- `main.py`
+- `src/index.tsx`
+- `dist/index.js` after frontend build
+
+Plugin capabilities:
+
+- enable or disable AutoTDP from Decky UI
+- select device profile and performance mode
+- set global overrides for TDP and monitor interval
+- detect active game by Steam AppID, executable, or Wine/Proton fallback
+- apply per-game override for currently detected title
+- experimental LED control for ASUS/ROG-class devices through `asusctl` or matching sysfs LED nodes
+
+Build frontend:
+
+```bash
+npm install
+npm run build
+```
+
+Decky distribution layout expected:
+
+- `dist/index.js`
+- `main.py`
+- `plugin.json`
+- `package.json`
+- optional profile JSON files bundled with plugin root
+
 ## Default Config
 
 Default config file path: `/etc/AutoTDP/AutoTDP.config`

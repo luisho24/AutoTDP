@@ -1,0 +1,19 @@
+{
+  "name": "AutoTDP",
+  "author": "Luisho24",
+  "flags": [
+    "_root"
+  ],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "performance",
+      "power",
+      "handheld",
+      "laptop",
+      "decky"
+    ],
+    "description": "Adaptive AMD TDP control for handhelds and laptops, with game-aware tuning and experimental LED controls.",
+    "image": "https://raw.githubusercontent.com/luisho24/AutoTDP/main/performance_8386346.png"
+  }
+}
