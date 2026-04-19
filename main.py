@@ -2,7 +2,9 @@ import asyncio
 import copy
 import json
 import os
+import pwd
 import re
+import select
 import shutil
 import subprocess
 import time
@@ -51,6 +53,12 @@ PLUGIN_DEFAULTS: Dict[str, Any] = {
     "battery_low_threshold": 25,
     "desired_fps": 60,
     "desired_fps_enabled": False,
+    "steam_ui_profile": {
+        "PERFORMANCE_MODE": "silent",
+        "DEFAULT_TDP": 6000,
+        "BATTERY_MAX_TDP": 6000,
+        "DESIRED_FPS": 45,
+    },
     "hhd_compatibility_mode": True,
     "restore_hhd_tdp_on_disable": True,
     "steamdb_cache": {},
@@ -93,10 +101,16 @@ class Plugin:
             "battery": {},
             "hhd": {},
             "ryzenadj": {},
+            "fps": None,
+            "focus": None,
+            "context": "unknown",
+            "effective_desired_fps": None,
+            "fps_target_unreachable": False,
         }
         self._candidate_tdp: Optional[int] = None
         self._stable_samples = 0
         self._last_adjustment = 0.0
+        self._fps_unreachable_samples = 0
 
     async def _main(self):
         self.loop = asyncio.get_event_loop()
@@ -203,6 +217,27 @@ class Plugin:
         self._refresh_state()
         if self.settings.get("enabled"):
             self._ensure_hhd_compatibility(force=False)
+        return self._compose_state()
+
+    async def update_steam_ui_profile(self, patch: Dict[str, Any]) -> Dict[str, Any]:
+        profile = self.settings.setdefault("steam_ui_profile", copy.deepcopy(PLUGIN_DEFAULTS["steam_ui_profile"]))
+        for key, value in patch.items():
+            if key == "clear" and value:
+                self.settings["steam_ui_profile"] = copy.deepcopy(PLUGIN_DEFAULTS["steam_ui_profile"])
+                break
+            if key not in PROFILE_OVERRIDE_KEYS:
+                continue
+            if value is None or value == "":
+                profile.pop(key, None)
+            elif key == "PERFORMANCE_MODE":
+                if value not in PERFORMANCE_MODES:
+                    raise ValueError(f"Unknown mode: {value}")
+                profile[key] = value
+            else:
+                profile[key] = int(value)
+
+        self._save_settings()
+        self._refresh_state()
         return self._compose_state()
 
     async def update_active_game_profile(self, patch: Dict[str, Any]) -> Dict[str, Any]:
@@ -448,6 +483,9 @@ class Plugin:
             out["ACTIVE_MAX_TDP"],
             self._align_to_step(max(min_tdp, int(out["ACTIVE_BATTERY_MAX_TDP"] * percent / 100)), step, min_tdp),
         )
+        out["ACTIVE_MONITOR_INTERVAL"] = min(int(out["ACTIVE_MONITOR_INTERVAL"]), 2)
+        out["ACTIVE_RYZENADJ_DELAY"] = 1
+        out["ACTIVE_STABLE_SAMPLE_COUNT"] = 1
         return out
 
     def _resolve_runtime_config(self, active_game: Optional[Dict[str, Any]], battery: Dict[str, Any]) -> Dict[str, Any]:
@@ -468,6 +506,14 @@ class Plugin:
             for key, value in self.settings.get("game_overrides", {}).get(game_override_key, {}).items():
                 config[key] = value
 
+        if not active_game and self.current_state.get("focus") in {None, "steam"}:
+            steam_ui_profile = self.settings.get("steam_ui_profile", {})
+            for key, value in steam_ui_profile.items():
+                config[key] = value
+            config["STEAM_UI_PROFILE_ACTIVE"] = True
+        else:
+            config["STEAM_UI_PROFILE_ACTIVE"] = False
+
         config = self._coerce_config(config)
         base_mode = config["PERFORMANCE_MODE"]
 
@@ -484,6 +530,138 @@ class Plugin:
             bool(self.settings.get("desired_fps_enabled", False)),
         )
         return config
+
+    def _resolve_gamescope_stats_pipe(self) -> Optional[str]:
+        session_uid = os.getuid()
+        plugin_parts = self.plugin_dir.split(os.sep)
+        if len(plugin_parts) > 2 and plugin_parts[1] == "home":
+            try:
+                session_uid = pwd.getpwnam(plugin_parts[2]).pw_uid
+            except KeyError:
+                session_uid = os.getuid()
+
+        base = f"/run/user/{session_uid}/gamescope-stats"
+        if os.path.islink(base):
+            target = os.path.realpath(base)
+            if os.path.isdir(target):
+                candidate = os.path.join(target, "stats.pipe")
+                if os.path.exists(candidate):
+                    return candidate
+            elif os.path.exists(target):
+                return target
+        if os.path.isdir(base):
+            candidate = os.path.join(base, "stats.pipe")
+            if os.path.exists(candidate):
+                return candidate
+        if os.path.exists(base):
+            return base
+        return None
+
+    def _resolve_session_user(self) -> Optional[str]:
+        plugin_parts = self.plugin_dir.split(os.sep)
+        if len(plugin_parts) > 2 and plugin_parts[1] == "home":
+            return plugin_parts[2]
+        return None
+
+    def _parse_gamescope_stats_bytes(self, payload: bytes) -> Dict[str, Any]:
+        result = {
+            "fps": self.current_state.get("fps"),
+            "focus": self.current_state.get("focus"),
+        }
+        if not payload:
+            return result
+        for line in payload.decode("utf-8", "ignore").splitlines():
+            line = line.strip()
+            if line.startswith("fps="):
+                try:
+                    result["fps"] = float(line.split("=", 1)[1])
+                except ValueError:
+                    pass
+            elif line.startswith("focus="):
+                result["focus"] = line.split("=", 1)[1].strip()
+        return result
+
+    def _poll_gamescope_stats_via_runuser(self, pipe_path: str) -> Dict[str, Any]:
+        result = {
+            "fps": self.current_state.get("fps"),
+            "focus": self.current_state.get("focus"),
+        }
+        session_user = self._resolve_session_user()
+        if not session_user or not self._command_exists("runuser"):
+            return result
+        try:
+            completed = subprocess.run(
+                [
+                    "runuser",
+                    "-u",
+                    session_user,
+                    "--",
+                    "python3",
+                    "-c",
+                    (
+                        "import os,select,time;"
+                        f"fd=os.open({pipe_path!r}, os.O_RDONLY|os.O_NONBLOCK);"
+                        "end=time.time()+0.2;buf=b'';"
+                        "\nwhile time.time()<end:\n"
+                        " r,_,_=select.select([fd],[],[],0.05)\n"
+                        " if not r: continue\n"
+                        " try:\n  chunk=os.read(fd,4096)\n except BlockingIOError:\n  continue\n"
+                        " if not chunk: continue\n"
+                        " buf+=chunk\n"
+                        " if buf: break\n"
+                        "os.close(fd);print(buf.decode('utf-8','ignore'), end='')"
+                    ),
+                ],
+                check=False,
+                capture_output=True,
+                text=False,
+            )
+            if completed.returncode == 0:
+                return self._parse_gamescope_stats_bytes(completed.stdout)
+        except Exception:
+            return result
+        return result
+
+    def _poll_gamescope_stats(self) -> Dict[str, Any]:
+        result = {
+            "fps": self.current_state.get("fps"),
+            "focus": self.current_state.get("focus"),
+        }
+        pipe_path = self._resolve_gamescope_stats_pipe()
+        if not pipe_path:
+            return result
+
+        fd = None
+        try:
+            fd = os.open(pipe_path, os.O_RDONLY | os.O_NONBLOCK)
+            collected = b""
+            end = time.time() + 0.2
+            while time.time() < end:
+                readable, _, _ = select.select([fd], [], [], 0.05)
+                if not readable:
+                    break
+                try:
+                    chunk = os.read(fd, 4096)
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    break
+                collected += chunk
+                if len(chunk) < 4096:
+                    break
+
+            if collected:
+                return self._parse_gamescope_stats_bytes(collected)
+        except OSError:
+            pass
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+        return self._poll_gamescope_stats_via_runuser(pipe_path)
 
     def _read_cpu_times(self) -> Tuple[int, int]:
         with open("/proc/stat", "r", encoding="utf-8") as handle:
@@ -663,6 +841,8 @@ class Plugin:
                 path = downloaded_path
                 active_source = "downloaded"
 
+        status = self._test_ryzenadj_binary(path)
+
         return {
             "selected_source": selected_source,
             "active_source": active_source,
@@ -675,7 +855,33 @@ class Plugin:
             "downloaded_available": downloaded_path is not None,
             "download_url": self.settings.get("ryzenadj_download_url"),
             "sources": list(RYZENADJ_SOURCES),
+            "test_ok": status["ok"],
+            "test_error": status["error"],
         }
+
+    def _test_ryzenadj_binary(self, path: Optional[str]) -> Dict[str, Any]:
+        if not path:
+            return {"ok": False, "error": "No RyzenAdj binary resolved"}
+        try:
+            result = subprocess.run(
+                [path, "--info"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            output = (result.stdout or "") + "\n" + (result.stderr or "")
+            nonfatal_markers = [
+                "CPU Family:",
+                "Version:",
+                "fallback to /dev/mem",
+                "Unable to init power metric table",
+            ]
+            ok = result.returncode == 0 or any(marker in output for marker in nonfatal_markers)
+            error = None if ok else (result.stderr.strip() or result.stdout.strip() or f"Exit code {result.returncode}")
+            return {"ok": ok, "error": error}
+        except Exception as error:
+            return {"ok": False, "error": str(error)}
 
     def _download_precompiled_ryzenadj(self) -> None:
         url = str(self.settings.get("ryzenadj_download_url", "")).strip()
@@ -915,6 +1121,10 @@ class Plugin:
         appid = self._detect_steam_appid()
         executable = self._detect_executable_name()
         launcher = self._detect_launcher_type()
+
+        if not appid and not executable and launcher == "steam":
+            launcher = None
+
         profile_info = self._lookup_bundled_game_profile(appid, executable, launcher)
 
         if not appid and not executable and not launcher:
@@ -980,12 +1190,60 @@ class Plugin:
                 tdp = tdp_values[index]
         return self._align_to_step(tdp, int(config["STEP_TDP"]), int(config["MIN_TDP"]))
 
+    def _apply_fps_feedback(self, tdp: int, config: Dict[str, Any], current_fps: Optional[float]) -> Tuple[int, int, bool]:
+        desired_enabled = bool(config.get("DESIRED_FPS_ENABLED", False))
+        desired_fps = int(config.get("DESIRED_FPS", 60))
+        effective_target = desired_fps
+        unreachable = False
+
+        if not desired_enabled or current_fps is None:
+            self._fps_unreachable_samples = 0
+            return tdp, effective_target, unreachable
+
+        max_tdp = int(config["ACTIVE_MAX_TDP"])
+        step = int(config["STEP_TDP"])
+        current_fps = max(1.0, float(current_fps))
+
+        if tdp >= max_tdp - step and current_fps < desired_fps - 8:
+            self._fps_unreachable_samples += 1
+        else:
+            self._fps_unreachable_samples = 0
+
+        if self._fps_unreachable_samples >= 6:
+            effective_target = max(30, min(desired_fps, int(current_fps + 3)))
+            unreachable = True
+
+        delta = effective_target - current_fps
+        adjustment_steps = 0
+        if delta > 12:
+            adjustment_steps = 5
+        elif delta > 6:
+            adjustment_steps = 3
+        elif delta > 2:
+            adjustment_steps = 1
+        elif delta < -20:
+            adjustment_steps = -5
+        elif delta < -10:
+            adjustment_steps = -3
+        elif delta < -4:
+            adjustment_steps = -2
+        elif delta < -1.5:
+            adjustment_steps = -1
+
+        adjusted_tdp = tdp + (adjustment_steps * step)
+        adjusted_tdp = max(int(config["MIN_TDP"]), min(max_tdp, adjusted_tdp))
+        adjusted_tdp = self._align_to_step(adjusted_tdp, step, int(config["MIN_TDP"]))
+        return adjusted_tdp, effective_target, unreachable
+
     def _apply_power_limit(self, requested_tdp: int, config: Dict[str, Any], external_power: bool) -> int:
         if external_power:
             return requested_tdp
         return min(requested_tdp, int(config["ACTIVE_BATTERY_MAX_TDP"]))
 
     def _refresh_state(self) -> None:
+        stats = self._poll_gamescope_stats()
+        self.current_state["fps"] = stats.get("fps")
+        self.current_state["focus"] = stats.get("focus")
         battery = self._read_battery()
         active_game = self._detect_active_game()
         config = self._resolve_runtime_config(active_game, battery)
@@ -997,6 +1255,12 @@ class Plugin:
         self.current_state["hhd"] = self._get_hhd_state()
         self.current_state["ryzenadj"] = self._resolve_ryzenadj_binary()
         self.current_state["external_power"] = self._is_on_external_power()
+        if active_game:
+            self.current_state["context"] = "game"
+        elif self.current_state.get("focus") in {None, "steam"}:
+            self.current_state["context"] = "steam_ui"
+        else:
+            self.current_state["context"] = "idle"
 
     async def _monitor_loop(self) -> None:
         previous_total, previous_idle = self._read_cpu_times()
@@ -1019,6 +1283,9 @@ class Plugin:
             external_power = self._is_on_external_power()
             self.current_state["external_power"] = external_power
             target_tdp = self._determine_tdp(cpu_usage, config)
+            target_tdp, effective_target, unreachable = self._apply_fps_feedback(target_tdp, config, self.current_state.get("fps"))
+            self.current_state["effective_desired_fps"] = effective_target if config.get("DESIRED_FPS_ENABLED") else None
+            self.current_state["fps_target_unreachable"] = unreachable
             limited_tdp = self._apply_power_limit(target_tdp, config, external_power)
 
             current_tdp = self.current_state.get("current_tdp")

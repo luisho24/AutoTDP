@@ -2,6 +2,7 @@ import { addEventListener, callable, definePlugin, removeEventListener } from "@
 import {
   ButtonItem,
   DropdownItem,
+  Field,
   ModalRoot,
   Navigation,
   PanelSection,
@@ -11,12 +12,17 @@ import {
   SliderField,
   ToggleField,
 } from "@decky/ui";
-import { useEffect, useMemo, useState } from "react";
-import { FaTachometerAlt } from "react-icons/fa";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { FaBatteryHalf, FaBolt, FaBullseye, FaDesktop, FaGamepad, FaTachometerAlt } from "react-icons/fa";
 
 type RuntimeState = {
   enabled: boolean;
   current_tdp: number | null;
+  fps: number | null;
+  focus: string | null;
+  context: string;
+  effective_desired_fps: number | null;
+  fps_target_unreachable: boolean;
   cpu_usage: number;
   external_power: boolean | null;
   active_game: {
@@ -58,6 +64,8 @@ type RuntimeState = {
     downloaded_path: string | null;
     download_url: string;
     sources: string[];
+    test_ok: boolean;
+    test_error: string | null;
   };
 };
 
@@ -75,6 +83,7 @@ type DeckyState = {
     battery_low_threshold: number;
     desired_fps: number;
     desired_fps_enabled: boolean;
+    steam_ui_profile: Record<string, string | number>;
     hhd_compatibility_mode: boolean;
     restore_hhd_tdp_on_disable: boolean;
     ryzenadj_source: string;
@@ -98,6 +107,7 @@ const setPerformanceMode = callable<[string], DeckyState>("set_performance_mode"
 const setProfileOverride = callable<[string, number | null], DeckyState>("set_profile_override");
 const setPluginSettings = callable<[Record<string, string | number | boolean>], DeckyState>("set_plugin_settings");
 const updateActiveGameProfile = callable<[Record<string, string | number | boolean | null>], DeckyState>("update_active_game_profile");
+const updateSteamUiProfile = callable<[Record<string, string | number | boolean | null>], DeckyState>("update_steam_ui_profile");
 const syncHhdTdp = callable<[boolean], DeckyState>("sync_hhd_tdp");
 const setRyzenadjSource = callable<[string], DeckyState>("set_ryzenadj_source");
 const downloadRyzenadj = callable<[], DeckyState>("download_ryzenadj");
@@ -140,6 +150,48 @@ function batterySummary(state: RuntimeState): string {
   return bits.join(" | ");
 }
 
+function contextLabel(state: RuntimeState): string {
+  if (state.context === "game") {
+    return "In game";
+  }
+  if (state.context === "steam_ui") {
+    return "Steam UI";
+  }
+  if (state.context === "idle") {
+    return "Idle desktop";
+  }
+  return "Unknown";
+}
+
+function chipStyle(background: string): React.CSSProperties {
+  return {
+    background,
+    borderRadius: 999,
+    padding: "4px 10px",
+    fontSize: "0.85em",
+    fontWeight: 600,
+  };
+}
+
+function summaryCardStyle(accent: string): React.CSSProperties {
+  return {
+    border: `1px solid ${accent}`,
+    borderRadius: 12,
+    padding: 12,
+    background: "rgba(255,255,255,0.04)",
+  };
+}
+
+function SelectableInfoRow(props: { label?: ReactNode; children: ReactNode }) {
+  return (
+    <PanelSectionRow>
+      <Field label={props.label} focusable highlightOnFocus>
+        <div>{props.children}</div>
+      </Field>
+    </PanelSectionRow>
+  );
+}
+
 function AdvancedModal(props: {
   data: DeckyState;
   onClose: () => void;
@@ -164,6 +216,10 @@ function AdvancedModal(props: {
   const [gameDefaultTdp, setGameDefaultTdp] = useState(Number(activeGameOverrides.DEFAULT_TDP ?? data.state.resolved_config.DEFAULT_TDP ?? 10000));
   const [gameBatteryTdp, setGameBatteryTdp] = useState(Number(activeGameOverrides.BATTERY_MAX_TDP ?? data.state.resolved_config.BATTERY_MAX_TDP ?? 15000));
   const [gameDesiredFps, setGameDesiredFps] = useState(Number(activeGameOverrides.DESIRED_FPS ?? data.settings.desired_fps));
+  const [steamUiMode, setSteamUiMode] = useState(String(data.settings.steam_ui_profile.PERFORMANCE_MODE ?? "silent"));
+  const [steamUiDefaultTdp, setSteamUiDefaultTdp] = useState(Number(data.settings.steam_ui_profile.DEFAULT_TDP ?? 6000));
+  const [steamUiBatteryTdp, setSteamUiBatteryTdp] = useState(Number(data.settings.steam_ui_profile.BATTERY_MAX_TDP ?? 6000));
+  const [steamUiDesiredFps, setSteamUiDesiredFps] = useState(Number(data.settings.steam_ui_profile.DESIRED_FPS ?? 45));
 
   const saveGameProfile = async () => {
     try {
@@ -186,6 +242,35 @@ function AdvancedModal(props: {
       onState(next);
       onError(null);
       setGameMode("");
+    } catch (caught) {
+      onError(String(caught));
+    }
+  };
+
+  const saveSteamUiProfile = async () => {
+    try {
+      const next = await updateSteamUiProfile({
+        PERFORMANCE_MODE: steamUiMode,
+        DEFAULT_TDP: steamUiDefaultTdp,
+        BATTERY_MAX_TDP: steamUiBatteryTdp,
+        DESIRED_FPS: steamUiDesiredFps,
+      });
+      onState(next);
+      onError(null);
+    } catch (caught) {
+      onError(String(caught));
+    }
+  };
+
+  const resetSteamUiProfile = async () => {
+    try {
+      const next = await updateSteamUiProfile({ clear: true });
+      onState(next);
+      onError(null);
+      setSteamUiMode("silent");
+      setSteamUiDefaultTdp(6000);
+      setSteamUiBatteryTdp(6000);
+      setSteamUiDesiredFps(45);
     } catch (caught) {
       onError(String(caught));
     }
@@ -282,8 +367,8 @@ function AdvancedModal(props: {
       content: (
         <>
           <PanelSection title="Active Game">
-            <PanelSectionRow>{activeGame?.display_name ?? "No active game detected"}</PanelSectionRow>
-            <PanelSectionRow>{activeGame?.steam_appid ? `Steam AppID: ${activeGame.steam_appid}` : "Non-Steam or unknown game"}</PanelSectionRow>
+            <SelectableInfoRow label="Detected title">{activeGame?.display_name ?? "No active game detected"}</SelectableInfoRow>
+            <SelectableInfoRow label="Steam info">{activeGame?.steam_appid ? `Steam AppID: ${activeGame.steam_appid}` : "Non-Steam or unknown game"}</SelectableInfoRow>
             {activeGame?.steamdb_url ? (
               <PanelSectionRow>
                 <ButtonItem
@@ -358,14 +443,81 @@ function AdvancedModal(props: {
       ),
     },
     {
+      title: "Steam UI",
+      identifier: "steam-ui",
+      content: (
+        <>
+          <PanelSection title="Steam UI Profile">
+            <PanelSectionRow>
+              <DropdownItem
+                label="Steam UI mode"
+                description="Profile used when not playing a game and gamescope focus is Steam"
+                rgOptions={modes}
+                selectedOption={steamUiMode}
+                onChange={(option) => setSteamUiMode(String(option.data))}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <SliderField
+                label="Steam UI default TDP"
+                description="Background and menu power target"
+                value={steamUiDefaultTdp}
+                min={Number(data.state.resolved_config.MIN_TDP)}
+                max={Number(data.state.resolved_config.MAX_CPU_TDP)}
+                step={Number(data.state.resolved_config.STEP_TDP)}
+                showValue
+                valueSuffix=" mW"
+                editableValue
+                onChange={(value) => setSteamUiDefaultTdp(value)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <SliderField
+                label="Steam UI battery max TDP"
+                description="Battery ceiling when browsing Steam UI"
+                value={steamUiBatteryTdp}
+                min={Number(data.state.resolved_config.MIN_TDP)}
+                max={Number(data.state.resolved_config.MAX_CPU_TDP)}
+                step={Number(data.state.resolved_config.STEP_TDP)}
+                showValue
+                valueSuffix=" mW"
+                editableValue
+                onChange={(value) => setSteamUiBatteryTdp(value)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <SliderField
+                label="Steam UI desired FPS"
+                description="Target while in menus"
+                value={steamUiDesiredFps}
+                min={30}
+                max={120}
+                step={1}
+                showValue
+                valueSuffix=" fps"
+                editableValue
+                onChange={(value) => setSteamUiDesiredFps(value)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem label="Save Steam UI profile" description="Persist Steam UI idle tuning" onClick={() => void saveSteamUiProfile()} />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem label="Reset Steam UI profile" description="Restore plugin defaults for menus" onClick={() => void resetSteamUiProfile()} />
+            </PanelSectionRow>
+          </PanelSection>
+        </>
+      ),
+    },
+    {
       title: "HHD",
       identifier: "hhd",
       content: (
         <>
           <PanelSection title="Handheld Daemon Compatibility">
-            <PanelSectionRow>Available: {data.state.hhd.available ? "Yes" : "No"}</PanelSectionRow>
-            <PanelSectionRow>Service active: {data.state.hhd.service_active ? "Yes" : "No"}</PanelSectionRow>
-            <PanelSectionRow>TDP enabled in HHD: {data.state.hhd.tdp_enabled === null ? "Unknown" : data.state.hhd.tdp_enabled ? "Yes" : "No"}</PanelSectionRow>
+            <SelectableInfoRow label="Available">{data.state.hhd.available ? "Yes" : "No"}</SelectableInfoRow>
+            <SelectableInfoRow label="Service active">{data.state.hhd.service_active ? "Yes" : "No"}</SelectableInfoRow>
+            <SelectableInfoRow label="HHD TDP state">{data.state.hhd.tdp_enabled === null ? "Unknown" : data.state.hhd.tdp_enabled ? "Yes" : "No"}</SelectableInfoRow>
             <PanelSectionRow>
               <ToggleField
                 label="HHD compatibility mode"
@@ -398,8 +550,8 @@ function AdvancedModal(props: {
       content: (
         <>
           <PanelSection title="Binary Source">
-            <PanelSectionRow>Selected source: {labelize(data.state.ryzenadj.selected_source)}</PanelSectionRow>
-            <PanelSectionRow>Active source: {data.state.ryzenadj.active_source ? labelize(data.state.ryzenadj.active_source) : "Unavailable"}</PanelSectionRow>
+            <SelectableInfoRow label="Selected source">{labelize(data.state.ryzenadj.selected_source)}</SelectableInfoRow>
+            <SelectableInfoRow label="Active source">{data.state.ryzenadj.active_source ? labelize(data.state.ryzenadj.active_source) : "Unavailable"}</SelectableInfoRow>
             <PanelSectionRow>
               <DropdownItem
                 label="RyzenAdj source"
@@ -409,10 +561,11 @@ function AdvancedModal(props: {
                 onChange={async (option) => onState(await setRyzenadjSource(String(option.data)))}
               />
             </PanelSectionRow>
-            <PanelSectionRow>System available: {data.state.ryzenadj.system_available ? "Yes" : "No"}</PanelSectionRow>
-            <PanelSectionRow>Bundled available: {data.state.ryzenadj.bundled_available ? "Yes" : "No"}</PanelSectionRow>
-            <PanelSectionRow>Downloaded available: {data.state.ryzenadj.downloaded_available ? "Yes" : "No"}</PanelSectionRow>
-            <PanelSectionRow>Resolved path: {data.state.ryzenadj.resolved_path ?? "None"}</PanelSectionRow>
+            <SelectableInfoRow label="System available">{data.state.ryzenadj.system_available ? "Yes" : "No"}</SelectableInfoRow>
+            <SelectableInfoRow label="Bundled available">{data.state.ryzenadj.bundled_available ? "Yes" : "No"}</SelectableInfoRow>
+            <SelectableInfoRow label="Downloaded available">{data.state.ryzenadj.downloaded_available ? "Yes" : "No"}</SelectableInfoRow>
+            <SelectableInfoRow label="Execution test">{data.state.ryzenadj.test_ok ? "OK" : data.state.ryzenadj.test_error ?? "Failed"}</SelectableInfoRow>
+            <SelectableInfoRow label="Resolved path">{data.state.ryzenadj.resolved_path ?? "None"}</SelectableInfoRow>
             <PanelSectionRow>
               <ButtonItem
                 label="Download precompiled RyzenAdj"
@@ -430,13 +583,13 @@ function AdvancedModal(props: {
       content: (
         <>
           <PanelSection title="Battery Stats">
-            <PanelSectionRow>{batterySummary(data.state)}</PanelSectionRow>
-            <PanelSectionRow>Present: {data.state.battery.present ? "Yes" : "No"}</PanelSectionRow>
-            <PanelSectionRow>Charge: {data.state.battery.percent ?? "Unknown"}%</PanelSectionRow>
-            <PanelSectionRow>Status: {data.state.battery.status ?? "Unknown"}</PanelSectionRow>
-            <PanelSectionRow>Power draw: {data.state.battery.power_w ?? "Unknown"} W</PanelSectionRow>
-            <PanelSectionRow>Energy: {data.state.battery.energy_wh ?? "Unknown"} Wh</PanelSectionRow>
-            <PanelSectionRow>Time estimate: {data.state.battery.formatted_time_remaining ?? "Unknown"}</PanelSectionRow>
+            <SelectableInfoRow label="Summary">{batterySummary(data.state)}</SelectableInfoRow>
+            <SelectableInfoRow label="Present">{data.state.battery.present ? "Yes" : "No"}</SelectableInfoRow>
+            <SelectableInfoRow label="Charge">{data.state.battery.percent ?? "Unknown"}%</SelectableInfoRow>
+            <SelectableInfoRow label="Status">{data.state.battery.status ?? "Unknown"}</SelectableInfoRow>
+            <SelectableInfoRow label="Power draw">{data.state.battery.power_w ?? "Unknown"} W</SelectableInfoRow>
+            <SelectableInfoRow label="Energy">{data.state.battery.energy_wh ?? "Unknown"} Wh</SelectableInfoRow>
+            <SelectableInfoRow label="Time estimate">{data.state.battery.formatted_time_remaining ?? "Unknown"}</SelectableInfoRow>
             <PanelSectionRow>
               <ButtonItem label="Refresh telemetry" description="Poll backend again" onClick={() => void onRefresh()} />
             </PanelSectionRow>
@@ -457,12 +610,21 @@ function Content() {
   const [data, setData] = useState<DeckyState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [quickDefaultTdp, setQuickDefaultTdp] = useState(10000);
+  const [quickBatteryTdp, setQuickBatteryTdp] = useState(12000);
+  const [quickMonitorInterval, setQuickMonitorInterval] = useState(2);
+  const [quickDesiredFps, setQuickDesiredFps] = useState(60);
 
   const refresh = async () => {
     try {
       setLoading(true);
       const next = await getState();
       setData(next);
+      const resolved = next.state.resolved_config;
+      setQuickDefaultTdp(Number(next.state.active_game && next.settings.auto_save_game_profiles ? resolved.DEFAULT_TDP : next.settings.profile_overrides.DEFAULT_TDP ?? resolved.DEFAULT_TDP));
+      setQuickBatteryTdp(Number(next.state.active_game && next.settings.auto_save_game_profiles ? resolved.BATTERY_MAX_TDP : next.settings.profile_overrides.BATTERY_MAX_TDP ?? resolved.BATTERY_MAX_TDP));
+      setQuickMonitorInterval(Number(next.settings.profile_overrides.MONITOR_INTERVAL ?? resolved.MONITOR_INTERVAL));
+      setQuickDesiredFps(Number(next.settings.desired_fps));
       setError(null);
     } catch (caught) {
       setError(String(caught));
@@ -486,6 +648,17 @@ function Content() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!data) {
+      return;
+    }
+    const resolved = data.state.resolved_config;
+    setQuickDefaultTdp(Number(data.state.active_game && data.settings.auto_save_game_profiles ? resolved.DEFAULT_TDP : data.settings.profile_overrides.DEFAULT_TDP ?? resolved.DEFAULT_TDP));
+    setQuickBatteryTdp(Number(data.state.active_game && data.settings.auto_save_game_profiles ? resolved.BATTERY_MAX_TDP : data.settings.profile_overrides.BATTERY_MAX_TDP ?? resolved.BATTERY_MAX_TDP));
+    setQuickMonitorInterval(Number(data.settings.profile_overrides.MONITOR_INTERVAL ?? resolved.MONITOR_INTERVAL));
+    setQuickDesiredFps(Number(data.settings.desired_fps));
+  }, [data?.settings.auto_save_game_profiles, data?.settings.desired_fps, data?.settings.profile_overrides.BATTERY_MAX_TDP, data?.settings.profile_overrides.DEFAULT_TDP, data?.settings.profile_overrides.MONITOR_INTERVAL, data?.state.active_game, data?.state.resolved_config]);
+
   if (loading && !data) {
     return <PanelSection title="AutoTDP"><PanelSectionRow>Loading...</PanelSectionRow></PanelSection>;
   }
@@ -499,6 +672,8 @@ function Content() {
   const currentMode = String(resolved.ACTIVE_MODE ?? resolved.PERFORMANCE_MODE ?? data.settings.performance_mode);
   const profileOpts = profileOptions(data.profiles);
   const modes = modeOptions(data.modes);
+  const liveFps = data.state.fps === null ? "Unknown" : `${data.state.fps.toFixed(1)} fps`;
+  const targetFps = data.state.effective_desired_fps ?? data.settings.desired_fps;
 
   const openAdvanced = () => {
     const modal = showModal(
@@ -521,28 +696,72 @@ function Content() {
 
   return (
     <>
-      <PanelSection title="Runtime">
+      <PanelSection title="Overview">
+        <PanelSectionRow>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, width: "100%" }}>
+            <div style={summaryCardStyle("rgba(68, 200, 255, 0.45)")}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <FaGamepad />
+                <strong>{currentGameLabel}</strong>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <span style={chipStyle("rgba(68, 200, 255, 0.18)")}>{contextLabel(data.state)}</span>
+                <span style={chipStyle("rgba(255, 215, 0, 0.18)")}>{labelize(currentMode)}</span>
+              </div>
+            </div>
+            <div style={summaryCardStyle("rgba(120, 255, 160, 0.45)")}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <FaBullseye />
+                <strong>{liveFps}</strong>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <span style={chipStyle("rgba(120, 255, 160, 0.18)")}>Target {targetFps} fps</span>
+                {data.state.fps_target_unreachable ? <span style={chipStyle("rgba(255, 120, 120, 0.18)")}>Auto-capped</span> : null}
+              </div>
+            </div>
+            <div style={summaryCardStyle("rgba(255, 180, 80, 0.45)")}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <FaTachometerAlt />
+                <strong>{data.state.current_tdp ?? resolved.ACTIVE_DEFAULT_TDP} mW</strong>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>CPU {data.state.cpu_usage}%</span>
+                <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>{data.state.ryzenadj.active_source ? labelize(data.state.ryzenadj.active_source) : "No ryzenadj"}</span>
+              </div>
+            </div>
+            <div style={summaryCardStyle("rgba(170, 120, 255, 0.45)")}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <FaBatteryHalf />
+                <strong>{batterySummary(data.state)}</strong>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <span style={chipStyle("rgba(170, 120, 255, 0.18)")}>{data.state.external_power ? "Plugged in" : "Battery / unknown"}</span>
+                <span style={chipStyle("rgba(170, 120, 255, 0.18)")}>{data.state.focus ?? "No focus data"}</span>
+              </div>
+            </div>
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Runtime Control">
         <PanelSectionRow>
           <ToggleField
-            label="Enable AutoTDP"
-            description="Adaptive TDP loop. HHD compatibility mode will disable only HHD TDP controls, not button helpers."
+            label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaBolt /> Enable AutoTDP</span>}
+            description="Adaptive TDP loop. HHD compatibility mode disables only HHD TDP control, not buttons or controller helpers."
             checked={data.settings.enabled}
             onChange={async (checked) => setData(await setEnabled(checked))}
           />
         </PanelSectionRow>
-        <PanelSectionRow>Game: {currentGameLabel}</PanelSectionRow>
-        <PanelSectionRow>CPU usage: {data.state.cpu_usage}%</PanelSectionRow>
-        <PanelSectionRow>Current TDP: {data.state.current_tdp ?? resolved.ACTIVE_DEFAULT_TDP} mW</PanelSectionRow>
-        <PanelSectionRow>Effective mode: {labelize(currentMode)}</PanelSectionRow>
-        <PanelSectionRow>RyzenAdj: {data.state.ryzenadj.active_source ? `${labelize(data.state.ryzenadj.active_source)} (${data.state.ryzenadj.resolved_path})` : "Unavailable"}</PanelSectionRow>
-        <PanelSectionRow>{batterySummary(data.state)}</PanelSectionRow>
+        <SelectableInfoRow label="Focused surface">{data.state.focus ?? "Unknown"}</SelectableInfoRow>
+        <SelectableInfoRow label="Context">{contextLabel(data.state)}</SelectableInfoRow>
+        <SelectableInfoRow label="Desired FPS control">{data.settings.desired_fps_enabled ? `On (${targetFps} fps)` : "Off"}</SelectableInfoRow>
       </PanelSection>
 
       <PanelSection title="Quick Settings">
         <PanelSectionRow>
           <DropdownItem
-            label="Device profile"
-            description="Hardware baseline"
+            label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaDesktop /> Device profile</span>}
+            description="Choose hardware baseline for handheld or laptop"
             rgOptions={profileOpts}
             selectedOption={data.settings.device_profile}
             onChange={async (option) => setData(await setDeviceProfile(String(option.data)))}
@@ -550,8 +769,8 @@ function Content() {
         </PanelSectionRow>
         <PanelSectionRow>
           <DropdownItem
-            label="Base mode"
-            description="Preferred AC / manual mode"
+            label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaBolt /> Base mode</span>}
+            description="Preferred performance mode when automation does not override it"
             rgOptions={modes}
             selectedOption={data.settings.performance_mode}
             onChange={async (option) => setData(await setPerformanceMode(String(option.data)))}
@@ -559,51 +778,60 @@ function Content() {
         </PanelSectionRow>
         <PanelSectionRow>
           <SliderField
-            label="Default TDP"
-            description={data.settings.auto_save_game_profiles && data.state.active_game ? "Auto-saves to current game profile" : "Global override"}
-            value={Number(data.state.active_game && data.settings.auto_save_game_profiles ? resolved.DEFAULT_TDP : data.settings.profile_overrides.DEFAULT_TDP ?? resolved.DEFAULT_TDP)}
+            label="Default game TDP"
+            description={data.settings.auto_save_game_profiles && data.state.active_game ? "Quick edit for active game profile" : "Global fallback target while gaming"}
+            value={quickDefaultTdp}
             min={Number(resolved.MIN_TDP)}
             max={Number(resolved.MAX_CPU_TDP)}
             step={Number(resolved.STEP_TDP)}
             showValue
             valueSuffix=" mW"
             editableValue
-            onChange={async (value) => setData(await setProfileOverride("DEFAULT_TDP", value))}
+            onChange={(value) => setQuickDefaultTdp(value)}
           />
         </PanelSectionRow>
         <PanelSectionRow>
+          <ButtonItem label="Apply default TDP" description="Commit current slider value" onClick={async () => setData(await setProfileOverride("DEFAULT_TDP", quickDefaultTdp))} />
+        </PanelSectionRow>
+        <PanelSectionRow>
           <SliderField
-            label="Battery max TDP"
-            description={data.settings.auto_save_game_profiles && data.state.active_game ? "Auto-saves to current game profile" : "Global override"}
-            value={Number(data.state.active_game && data.settings.auto_save_game_profiles ? resolved.BATTERY_MAX_TDP : data.settings.profile_overrides.BATTERY_MAX_TDP ?? resolved.BATTERY_MAX_TDP)}
+            label="Battery TDP ceiling"
+            description={data.settings.auto_save_game_profiles && data.state.active_game ? "Quick edit for active game profile" : "Limit battery drain during play"}
+            value={quickBatteryTdp}
             min={Number(resolved.MIN_TDP)}
             max={Number(resolved.MAX_CPU_TDP)}
             step={Number(resolved.STEP_TDP)}
             showValue
             valueSuffix=" mW"
             editableValue
-            onChange={async (value) => setData(await setProfileOverride("BATTERY_MAX_TDP", value))}
+            onChange={(value) => setQuickBatteryTdp(value)}
           />
         </PanelSectionRow>
         <PanelSectionRow>
+          <ButtonItem label="Apply battery ceiling" description="Commit current slider value" onClick={async () => setData(await setProfileOverride("BATTERY_MAX_TDP", quickBatteryTdp))} />
+        </PanelSectionRow>
+        <PanelSectionRow>
           <SliderField
-            label="Monitor interval"
-            description={data.settings.auto_save_game_profiles && data.state.active_game ? "Auto-saves to current game profile" : "Global override"}
-            value={Number(data.settings.profile_overrides.MONITOR_INTERVAL ?? resolved.MONITOR_INTERVAL)}
+            label="Sampling interval"
+            description="How fast AutoTDP re-checks load and FPS telemetry"
+            value={quickMonitorInterval}
             min={1}
-            max={10}
+            max={5}
             step={1}
             showValue
             valueSuffix=" s"
             editableValue
-            onChange={async (value) => setData(await setProfileOverride("MONITOR_INTERVAL", value))}
+            onChange={(value) => setQuickMonitorInterval(value)}
           />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem label="Apply sampling interval" description="Commit current slider value" onClick={async () => setData(await setProfileOverride("MONITOR_INTERVAL", quickMonitorInterval))} />
         </PanelSectionRow>
         <PanelSectionRow>
           <SliderField
             label="Desired FPS"
-            description="Experimental heuristic target"
-            value={data.settings.desired_fps}
+            description="Experimental. AutoTDP trims extra CPU power headroom when FPS sits above target and reacts faster when below target"
+            value={quickDesiredFps}
             min={30}
             max={120}
             step={1}
@@ -611,15 +839,26 @@ function Content() {
             valueSuffix=" fps"
             editableValue
             disabled={!data.settings.desired_fps_enabled}
-            onChange={async (value) => setData(await setPluginSettings({ desired_fps: value }))}
+            onChange={(value) => setQuickDesiredFps(value)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem label="Apply desired FPS" description="Commit current slider value" onClick={async () => setData(await setPluginSettings({ desired_fps: quickDesiredFps }))} />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaBullseye /> Desired FPS control</span>}
+            description="Experimental. Uses real Gamescope FPS telemetry when available"
+            checked={data.settings.desired_fps_enabled}
+            onChange={async (checked) => setData(await setPluginSettings({ desired_fps_enabled: checked }))}
           />
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
-            label="Desired FPS enabled"
-            description="Experimental. May improve battery by cutting excess TDP headroom"
-            checked={data.settings.desired_fps_enabled}
-            onChange={async (checked) => setData(await setPluginSettings({ desired_fps_enabled: checked }))}
+            label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaBatteryHalf /> Auto battery switching</span>}
+            description="Switch to battery-specific modes automatically but still keep your manual base mode for AC"
+            checked={data.settings.auto_battery_switch}
+            onChange={async (checked) => setData(await setPluginSettings({ auto_battery_switch: checked }))}
           />
         </PanelSectionRow>
       </PanelSection>
