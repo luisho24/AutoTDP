@@ -33,6 +33,8 @@ type RuntimeState = {
     steam_appid?: string | null;
     steamdb_name?: string | null;
     steamdb_url?: string | null;
+    image_url?: string | null;
+    library_image_url?: string | null;
   } | null;
   active_device_profile: string | null;
   resolved_config: Record<string, number | string | boolean>;
@@ -179,6 +181,18 @@ function summaryCardStyle(accent: string): React.CSSProperties {
     borderRadius: 12,
     padding: 12,
     background: "rgba(255,255,255,0.04)",
+  };
+}
+
+function getQuickProfileValues(data: DeckyState) {
+  const resolved = data.state.resolved_config;
+  return {
+    minTdp: Number(data.settings.profile_overrides.MIN_TDP ?? resolved.MIN_TDP),
+    defaultTdp: Number(data.state.active_game && data.settings.auto_save_game_profiles ? resolved.DEFAULT_TDP : data.settings.profile_overrides.DEFAULT_TDP ?? resolved.DEFAULT_TDP),
+    maxTdp: Number(data.settings.profile_overrides.MAX_CPU_TDP ?? resolved.MAX_CPU_TDP),
+    batteryTdp: Number(data.state.active_game && data.settings.auto_save_game_profiles ? resolved.BATTERY_MAX_TDP : data.settings.profile_overrides.BATTERY_MAX_TDP ?? resolved.BATTERY_MAX_TDP),
+    monitorInterval: Number(data.settings.profile_overrides.MONITOR_INTERVAL ?? resolved.MONITOR_INTERVAL),
+    desiredFps: Number(data.settings.desired_fps),
   };
 }
 
@@ -610,21 +624,30 @@ function Content() {
   const [data, setData] = useState<DeckyState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [quickMinTdp, setQuickMinTdp] = useState(5000);
   const [quickDefaultTdp, setQuickDefaultTdp] = useState(10000);
-  const [quickBatteryTdp, setQuickBatteryTdp] = useState(12000);
+  const [quickMaxTdp, setQuickMaxTdp] = useState(20000);
   const [quickMonitorInterval, setQuickMonitorInterval] = useState(2);
   const [quickDesiredFps, setQuickDesiredFps] = useState(60);
+
+  const applyData = (next: DeckyState, syncQuick: boolean = true) => {
+    setData(next);
+    if (!syncQuick) {
+      return;
+    }
+    const quick = getQuickProfileValues(next);
+    setQuickMinTdp(quick.minTdp);
+    setQuickDefaultTdp(quick.defaultTdp);
+    setQuickMaxTdp(quick.maxTdp);
+    setQuickMonitorInterval(quick.monitorInterval);
+    setQuickDesiredFps(quick.desiredFps);
+  };
 
   const refresh = async () => {
     try {
       setLoading(true);
       const next = await getState();
-      setData(next);
-      const resolved = next.state.resolved_config;
-      setQuickDefaultTdp(Number(next.state.active_game && next.settings.auto_save_game_profiles ? resolved.DEFAULT_TDP : next.settings.profile_overrides.DEFAULT_TDP ?? resolved.DEFAULT_TDP));
-      setQuickBatteryTdp(Number(next.state.active_game && next.settings.auto_save_game_profiles ? resolved.BATTERY_MAX_TDP : next.settings.profile_overrides.BATTERY_MAX_TDP ?? resolved.BATTERY_MAX_TDP));
-      setQuickMonitorInterval(Number(next.settings.profile_overrides.MONITOR_INTERVAL ?? resolved.MONITOR_INTERVAL));
-      setQuickDesiredFps(Number(next.settings.desired_fps));
+      applyData(next);
       setError(null);
     } catch (caught) {
       setError(String(caught));
@@ -648,23 +671,6 @@ function Content() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!data) {
-      return;
-    }
-    const resolved = data.state.resolved_config;
-    setQuickDefaultTdp(Number(data.state.active_game && data.settings.auto_save_game_profiles ? resolved.DEFAULT_TDP : data.settings.profile_overrides.DEFAULT_TDP ?? resolved.DEFAULT_TDP));
-    setQuickBatteryTdp(Number(data.state.active_game && data.settings.auto_save_game_profiles ? resolved.BATTERY_MAX_TDP : data.settings.profile_overrides.BATTERY_MAX_TDP ?? resolved.BATTERY_MAX_TDP));
-    setQuickMonitorInterval(Number(data.settings.profile_overrides.MONITOR_INTERVAL ?? resolved.MONITOR_INTERVAL));
-  }, [data?.settings.auto_save_game_profiles, data?.settings.profile_overrides.BATTERY_MAX_TDP, data?.settings.profile_overrides.DEFAULT_TDP, data?.settings.profile_overrides.MONITOR_INTERVAL, data?.state.active_game, data?.state.resolved_config]);
-
-  useEffect(() => {
-    if (!data) {
-      return;
-    }
-    setQuickDesiredFps(Number(data.settings.desired_fps));
-  }, [data?.settings.desired_fps]);
-
   if (loading && !data) {
     return <PanelSection title="AutoTDP"><PanelSectionRow>Loading...</PanelSectionRow></PanelSection>;
   }
@@ -675,6 +681,7 @@ function Content() {
 
   const resolved = data.state.resolved_config;
   const currentGameLabel = data.state.active_game?.steamdb_name ?? data.state.active_game?.display_name ?? "No game detected";
+  const currentGameArt = data.state.active_game?.library_image_url ?? data.state.active_game?.image_url ?? null;
   const currentMode = String(resolved.ACTIVE_MODE ?? resolved.PERFORMANCE_MODE ?? data.settings.performance_mode);
   const profileOpts = profileOptions(data.profiles);
   const modes = modeOptions(data.modes);
@@ -687,7 +694,7 @@ function Content() {
         data={data}
         onClose={() => modal.Close()}
         onRefresh={refresh}
-        onState={setData}
+        onState={applyData}
         onError={setError}
       />,
       undefined,
@@ -705,17 +712,23 @@ function Content() {
       <PanelSection title="Overview">
         <SelectableInfoRow label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaGamepad /> Current activity</span>}>
           <div style={summaryCardStyle("rgba(68, 200, 255, 0.45)")}>
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>{currentGameLabel}</div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              <span style={chipStyle("rgba(68, 200, 255, 0.18)")}>{contextLabel(data.state)}</span>
-              <span style={chipStyle("rgba(255, 215, 0, 0.18)")}>{labelize(currentMode)}</span>
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              {currentGameArt ? <img src={currentGameArt} alt={currentGameLabel} style={{ width: 64, height: 30, objectFit: "cover", borderRadius: 8 }} /> : null}
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>{currentGameLabel}</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <span style={chipStyle("rgba(68, 200, 255, 0.18)")}>{contextLabel(data.state)}</span>
+                  <span style={chipStyle("rgba(255, 215, 0, 0.18)")}>{labelize(currentMode)}</span>
+                </div>
+              </div>
             </div>
           </div>
         </SelectableInfoRow>
         <SelectableInfoRow label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaBullseye /> FPS target</span>}>
           <div style={summaryCardStyle("rgba(120, 255, 160, 0.45)")}>
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>{liveFps}</div>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{liveFps} / {targetFps} fps</div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <span style={chipStyle("rgba(120, 255, 160, 0.18)")}>Current {liveFps}</span>
               <span style={chipStyle("rgba(120, 255, 160, 0.18)")}>Target {targetFps} fps</span>
               {data.state.fps_target_unreachable ? <span style={chipStyle("rgba(255, 120, 120, 0.18)")}>Auto-capped</span> : null}
             </div>
@@ -726,6 +739,8 @@ function Content() {
             <div style={{ fontWeight: 700, marginBottom: 6 }}>{data.state.current_tdp ?? resolved.ACTIVE_DEFAULT_TDP} mW</div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>CPU {data.state.cpu_usage}%</span>
+              <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>Min {Number(resolved.MIN_TDP)} mW</span>
+              <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>Ceiling {Number(resolved.MAX_CPU_TDP)} mW</span>
               <span style={chipStyle("rgba(255, 180, 80, 0.18)")}>{data.state.ryzenadj.active_source ? labelize(data.state.ryzenadj.active_source) : "No ryzenadj"}</span>
             </div>
           </div>
@@ -747,12 +762,10 @@ function Content() {
             label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaBolt /> Enable AutoTDP</span>}
             description="Adaptive TDP loop. HHD compatibility mode disables only HHD TDP control, not buttons or controller helpers."
             checked={data.settings.enabled}
-            onChange={async (checked) => setData(await setEnabled(checked))}
+            onChange={async (checked) => applyData(await setEnabled(checked))}
           />
         </PanelSectionRow>
-        <SelectableInfoRow label="Focused surface">{data.state.focus ?? "Unknown"}</SelectableInfoRow>
-        <SelectableInfoRow label="Context">{contextLabel(data.state)}</SelectableInfoRow>
-        <SelectableInfoRow label="Desired FPS control">{data.settings.desired_fps_enabled ? `On (${targetFps} fps)` : "Off"}</SelectableInfoRow>
+        <SelectableInfoRow label="RyzenAdj status">{data.state.ryzenadj.test_ok ? `Ready (${data.state.ryzenadj.active_source ?? "none"})` : data.state.ryzenadj.test_error ?? "Unavailable"}</SelectableInfoRow>
       </PanelSection>
 
       <PanelSection title="Quick Settings">
@@ -762,7 +775,7 @@ function Content() {
             description="Choose hardware baseline for handheld or laptop"
             rgOptions={profileOpts}
             selectedOption={data.settings.device_profile}
-            onChange={async (option) => setData(await setDeviceProfile(String(option.data)))}
+            onChange={async (option) => applyData(await setDeviceProfile(String(option.data)))}
           />
         </PanelSectionRow>
         <PanelSectionRow>
@@ -771,59 +784,65 @@ function Content() {
             description="Preferred performance mode when automation does not override it"
             rgOptions={modes}
             selectedOption={data.settings.performance_mode}
-            onChange={async (option) => setData(await setPerformanceMode(String(option.data)))}
+            onChange={async (option) => applyData(await setPerformanceMode(String(option.data)))}
           />
         </PanelSectionRow>
         <PanelSectionRow>
           <SliderField
-            label="Default game TDP"
-            description={data.settings.auto_save_game_profiles && data.state.active_game ? "Quick edit for active game profile" : "Global fallback target while gaming"}
+            label="Minimum TDP"
+            description="Lowest TDP AutoTDP may use"
+            value={quickMinTdp}
+            min={2000}
+            max={quickMaxTdp}
+            step={1000}
+            showValue
+            valueSuffix=" mW"
+            editableValue
+            onChange={async (value) => {
+              const clamped = Math.min(value, quickDefaultTdp, quickMaxTdp);
+              setQuickMinTdp(clamped);
+              const next = await setProfileOverride("MIN_TDP", clamped);
+              applyData(next);
+            }}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <SliderField
+            label="Default TDP"
+            description={data.settings.auto_save_game_profiles && data.state.active_game ? "Quick edit for active game profile" : "Default target while gaming"}
             value={quickDefaultTdp}
-            min={Number(resolved.MIN_TDP)}
-            max={Number(resolved.MAX_CPU_TDP)}
+            min={quickMinTdp}
+            max={quickMaxTdp}
             step={Number(resolved.STEP_TDP)}
             showValue
             valueSuffix=" mW"
             editableValue
-            onChange={(value) => setQuickDefaultTdp(value)}
+            onChange={async (value) => {
+              const clamped = Math.max(quickMinTdp, Math.min(value, quickMaxTdp));
+              setQuickDefaultTdp(clamped);
+              const next = await setProfileOverride("DEFAULT_TDP", clamped);
+              applyData(next);
+            }}
           />
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem label="Apply default TDP" description="Commit current slider value" onClick={async () => setData(await setProfileOverride("DEFAULT_TDP", quickDefaultTdp))} />
-        </PanelSectionRow>
-        <PanelSectionRow>
           <SliderField
-            label="Battery TDP ceiling"
-            description={data.settings.auto_save_game_profiles && data.state.active_game ? "Quick edit for active game profile" : "Limit battery drain during play"}
-            value={quickBatteryTdp}
-            min={Number(resolved.MIN_TDP)}
-            max={Number(resolved.MAX_CPU_TDP)}
-            step={Number(resolved.STEP_TDP)}
+            label="Ceiling TDP"
+            description="Highest TDP AutoTDP may use"
+            value={quickMaxTdp}
+            min={quickMinTdp}
+            max={35000}
+            step={1000}
             showValue
             valueSuffix=" mW"
             editableValue
-            onChange={(value) => setQuickBatteryTdp(value)}
+            onChange={async (value) => {
+              const clamped = Math.max(value, quickDefaultTdp, quickMinTdp);
+              setQuickMaxTdp(clamped);
+              const next = await setProfileOverride("MAX_CPU_TDP", clamped);
+              applyData(next);
+            }}
           />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem label="Apply battery ceiling" description="Commit current slider value" onClick={async () => setData(await setProfileOverride("BATTERY_MAX_TDP", quickBatteryTdp))} />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <SliderField
-            label="Sampling interval"
-            description="How fast AutoTDP re-checks load and FPS telemetry"
-            value={quickMonitorInterval}
-            min={1}
-            max={5}
-            step={1}
-            showValue
-            valueSuffix=" s"
-            editableValue
-            onChange={(value) => setQuickMonitorInterval(value)}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem label="Apply sampling interval" description="Commit current slider value" onClick={async () => setData(await setProfileOverride("MONITOR_INTERVAL", quickMonitorInterval))} />
         </PanelSectionRow>
         <PanelSectionRow>
           <SliderField
@@ -839,7 +858,8 @@ function Content() {
             disabled={!data.settings.desired_fps_enabled}
             onChange={async (value) => {
               setQuickDesiredFps(value);
-              setData(await setPluginSettings({ desired_fps: value }));
+              const next = await setPluginSettings({ desired_fps: value });
+              applyData(next, false);
             }}
           />
         </PanelSectionRow>
@@ -848,7 +868,7 @@ function Content() {
             label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaBullseye /> Desired FPS control</span>}
             description="Experimental. Uses real Gamescope FPS telemetry when available"
             checked={data.settings.desired_fps_enabled}
-            onChange={async (checked) => setData(await setPluginSettings({ desired_fps_enabled: checked }))}
+            onChange={async (checked) => applyData(await setPluginSettings({ desired_fps_enabled: checked }))}
           />
         </PanelSectionRow>
         <PanelSectionRow>
@@ -856,7 +876,25 @@ function Content() {
             label={<span style={{ display: "flex", alignItems: "center", gap: 8 }}><FaBatteryHalf /> Auto battery switching</span>}
             description="Switch to battery-specific modes automatically but still keep your manual base mode for AC"
             checked={data.settings.auto_battery_switch}
-            onChange={async (checked) => setData(await setPluginSettings({ auto_battery_switch: checked }))}
+            onChange={async (checked) => applyData(await setPluginSettings({ auto_battery_switch: checked }))}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <SliderField
+            label="Sampling interval"
+            description="How fast AutoTDP re-checks load and FPS telemetry"
+            value={quickMonitorInterval}
+            min={1}
+            max={5}
+            step={1}
+            showValue
+            valueSuffix=" s"
+            editableValue
+            onChange={async (value) => {
+              setQuickMonitorInterval(value);
+              const next = await setProfileOverride("MONITOR_INTERVAL", value);
+              applyData(next, false);
+            }}
           />
         </PanelSectionRow>
       </PanelSection>

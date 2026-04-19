@@ -34,7 +34,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 PERFORMANCE_MODES: Tuple[str, ...] = ("silent", "battery", "balanced", "performance", "turbo")
 RYZENADJ_SOURCES: Tuple[str, ...] = ("auto", "system", "bundled", "downloaded")
 PROFILE_OVERRIDE_KEYS: Tuple[str, ...] = (
+    "MIN_TDP",
     "DEFAULT_TDP",
+    "MAX_CPU_TDP",
     "BATTERY_MAX_TDP",
     "MONITOR_INTERVAL",
     "PERFORMANCE_MODE",
@@ -997,6 +999,8 @@ class Plugin:
         entry = cache.get(appid)
         if not entry:
             return None
+        if entry.get("name") == f"Steam App {appid}":
+            return None
         return entry
 
     def _steamdb_cache_set(self, appid: str, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1043,6 +1047,8 @@ class Plugin:
             "appid": appid,
             "name": title or f"Steam App {appid}",
             "steamdb_url": steamdb_url,
+            "image_url": f"https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{appid}/header.jpg",
+            "library_image_url": f"https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{appid}/library_600x900_2x.jpg",
         }
         return self._steamdb_cache_set(appid, data)
 
@@ -1138,6 +1144,8 @@ class Plugin:
             "steam_appid": appid,
             "steamdb_name": None,
             "steamdb_url": None,
+            "image_url": None,
+            "library_image_url": None,
         }
 
         if profile_info:
@@ -1156,6 +1164,8 @@ class Plugin:
             metadata = self._fetch_steamdb_info(appid)
             active["steamdb_name"] = metadata.get("name")
             active["steamdb_url"] = metadata.get("steamdb_url")
+            active["image_url"] = metadata.get("image_url")
+            active["library_image_url"] = metadata.get("library_image_url")
 
         if active.get("steamdb_name"):
             active["display_name"] = active["steamdb_name"]
