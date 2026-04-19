@@ -133,10 +133,16 @@ function batterySummary(state) {
     if (state.battery.status) {
         bits.push(state.battery.status);
     }
-    if (state.battery.power_w !== null) {
+    if (state.battery.power_w_average !== null && state.battery.power_w_average !== undefined) {
+        bits.push(`${state.battery.power_w_average}W avg`);
+    }
+    else if (state.battery.power_w !== null) {
         bits.push(`${state.battery.power_w}W`);
     }
-    if (state.battery.formatted_time_remaining) {
+    if (state.battery.formatted_time_remaining_average) {
+        bits.push(`${state.battery.formatted_time_remaining_average} est`);
+    }
+    else if (state.battery.formatted_time_remaining) {
         bits.push(state.battery.formatted_time_remaining);
     }
     return bits.join(" | ");

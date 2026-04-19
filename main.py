@@ -113,6 +113,7 @@ class Plugin:
         self._stable_samples = 0
         self._last_adjustment = 0.0
         self._fps_unreachable_samples = 0
+        self._battery_power_samples: List[float] = []
 
     async def _main(self):
         self.loop = asyncio.get_event_loop()
@@ -689,9 +690,12 @@ class Plugin:
             "percent": None,
             "status": None,
             "power_w": None,
+            "power_w_average": None,
             "energy_wh": None,
             "seconds_remaining": None,
+            "seconds_remaining_average": None,
             "formatted_time_remaining": None,
+            "formatted_time_remaining_average": None,
         }
         if not os.path.isdir(power_root):
             return empty
@@ -775,14 +779,42 @@ class Plugin:
             minutes = (seconds_remaining % 3600) // 60
             formatted = f"{hours}h {minutes}m"
 
+        averaged_power = None
+        averaged_seconds_remaining = None
+        averaged_formatted = None
+        if power_now is not None and power_now > 0:
+            self._battery_power_samples.append(power_now)
+            self._battery_power_samples = self._battery_power_samples[-12:]
+            averaged_power = sum(self._battery_power_samples) / len(self._battery_power_samples)
+
+        if status == "Discharging" and averaged_power and averaged_power > 0 and energy_wh and energy_wh > 0:
+            averaged_seconds_remaining = int((energy_wh / averaged_power) * 3600)
+        elif status == "Charging" and averaged_power and averaged_power > 0 and energy_full and energy_now is not None:
+            if os.path.isfile(os.path.join(battery_path, "energy_full")):
+                remaining_wh = max(0.0, (energy_full - energy_now) / 1000000.0)
+            elif voltage_now is not None:
+                remaining_wh = max(0.0, (energy_full - energy_now) * voltage_now / 1000000000000.0)
+            else:
+                remaining_wh = 0.0
+            if remaining_wh > 0:
+                averaged_seconds_remaining = int((remaining_wh / averaged_power) * 3600)
+
+        if averaged_seconds_remaining is not None:
+            hours = averaged_seconds_remaining // 3600
+            minutes = (averaged_seconds_remaining % 3600) // 60
+            averaged_formatted = f"{hours}h {minutes}m"
+
         return {
             "present": True,
             "percent": int(percent) if percent is not None else None,
             "status": status,
             "power_w": round(power_now, 2) if power_now is not None else None,
+            "power_w_average": round(averaged_power, 2) if averaged_power is not None else None,
             "energy_wh": round(energy_wh, 2) if energy_wh is not None else None,
             "seconds_remaining": seconds_remaining,
+            "seconds_remaining_average": averaged_seconds_remaining,
             "formatted_time_remaining": formatted,
+            "formatted_time_remaining_average": averaged_formatted,
         }
 
     def _is_on_external_power(self) -> bool:
