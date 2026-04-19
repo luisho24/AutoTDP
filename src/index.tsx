@@ -56,6 +56,11 @@ type RuntimeState = {
     tdp_enabled: boolean | null;
     compatibility_mode: boolean;
     auto_disabled_by_plugin: boolean;
+    conflict_warning?: string | null;
+  };
+  asus_wmi?: {
+    available: boolean;
+    values?: Record<string, string | null>;
   };
   ryzenadj: {
     selected_source: string;
@@ -801,6 +806,8 @@ function Content() {
           />
         </PanelSectionRow>
         <SelectableInfoRow label="RyzenAdj status">{data.state.ryzenadj.test_ok ? `Ready (${data.state.ryzenadj.active_source ?? "none"})` : data.state.ryzenadj.test_error ?? "Unavailable"}</SelectableInfoRow>
+        {data.state.asus_wmi?.available ? <SelectableInfoRow label="ASUS WMI power path">Active</SelectableInfoRow> : null}
+        {data.state.hhd.conflict_warning ? <SelectableInfoRow label="Conflict warning">{data.state.hhd.conflict_warning}</SelectableInfoRow> : null}
       </PanelSection>
 
       <PanelSection title="Quick Settings">

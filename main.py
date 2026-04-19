@@ -102,6 +102,7 @@ class Plugin:
             "resolved_config": copy.deepcopy(DEFAULT_CONFIG),
             "battery": {},
             "hhd": {},
+            "asus_wmi": {},
             "ryzenadj": {},
             "fps": None,
             "focus": None,
@@ -935,18 +936,58 @@ class Plugin:
 
     def _set_tdp_sync(self, value: int) -> None:
         command = self.current_state.get("ryzenadj", {}).get("resolved_path")
-        if not command:
-            decky.logger.warning("ryzenadj not found, skipping TDP update")
+        if command:
+            try:
+                subprocess.run(
+                    [command, "--stapm-limit", str(value), "--fast-limit", str(value), "--slow-limit", str(value)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            except Exception as error:
+                decky.logger.error(f"Failed to set TDP via ryzenadj: {error}")
+        else:
+            decky.logger.warning("ryzenadj not found, continuing with platform fallback if available")
+
+        self._set_asus_wmi_tdp_sync(value)
+
+    def _get_asus_wmi_state(self) -> Dict[str, Any]:
+        root = "/sys/devices/platform/asus-nb-wmi"
+        paths = {
+            "pl1": os.path.join(root, "ppt_pl1_spl"),
+            "pl2": os.path.join(root, "ppt_pl2_sppt"),
+            "fppt": os.path.join(root, "ppt_fppt"),
+            "apu": os.path.join(root, "ppt_apu_sppt"),
+            "platform": os.path.join(root, "ppt_platform_sppt"),
+            "profile": "/sys/firmware/acpi/platform_profile",
+        }
+        values: Dict[str, Any] = {
+            "available": os.path.isdir(root),
+            "paths": paths,
+            "values": {},
+        }
+        for key, path in paths.items():
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        values["values"][key] = handle.read().strip()
+                except OSError:
+                    values["values"][key] = None
+        return values
+
+    def _set_asus_wmi_tdp_sync(self, value: int) -> None:
+        state = self._get_asus_wmi_state()
+        if not state.get("available"):
             return
-        try:
-            subprocess.run(
-                [command, "--stapm-limit", str(value), "--fast-limit", str(value), "--slow-limit", str(value)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except Exception as error:
-            decky.logger.error(f"Failed to set TDP: {error}")
+        for key in ("pl1", "pl2", "fppt", "apu", "platform"):
+            path = state["paths"].get(key)
+            if not path or not os.path.isfile(path):
+                continue
+            try:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(str(value))
+            except OSError as error:
+                decky.logger.warning(f"Failed to set ASUS WMI {key}: {error}")
 
     def _get_hhd_state(self) -> Dict[str, Any]:
         state = {
@@ -955,6 +996,7 @@ class Plugin:
             "tdp_enabled": None,
             "compatibility_mode": bool(self.settings.get("hhd_compatibility_mode", True)),
             "auto_disabled_by_plugin": bool(self.settings.get("hhd_auto_disabled_tdp", False)),
+            "conflict_warning": None,
         }
         if not state["available"]:
             return state
@@ -981,6 +1023,12 @@ class Plugin:
                 state["tdp_enabled"] = result.stdout.strip().lower() == "true"
         except Exception:
             state["tdp_enabled"] = None
+
+        if state["service_active"] and os.path.isdir("/sys/devices/platform/asus-nb-wmi"):
+            if state["tdp_enabled"] is False:
+                state["conflict_warning"] = "HHD TDP control is off, but HHD thermal-profile switching may still affect ASUS platform PPT behavior."
+            elif state["tdp_enabled"] is True:
+                state["conflict_warning"] = "HHD TDP control is active and may override AutoTDP settings."
 
         return state
 
@@ -1295,6 +1343,7 @@ class Plugin:
         self.current_state["active_device_profile"] = config.get("DEVICE_PROFILE")
         self.current_state["resolved_config"] = config
         self.current_state["hhd"] = self._get_hhd_state()
+        self.current_state["asus_wmi"] = self._get_asus_wmi_state()
         self.current_state["ryzenadj"] = self._resolve_ryzenadj_binary()
         self.current_state["external_power"] = self._is_on_external_power()
         if active_game:
