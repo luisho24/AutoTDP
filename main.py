@@ -66,6 +66,8 @@ PLUGIN_DEFAULTS: Dict[str, Any] = {
     "steamdb_cache": {},
     "hhd_auto_disabled_tdp": False,
     "hhd_previous_tdp_enabled": None,
+    "platform_profile_auto_changed": False,
+    "previous_platform_profile": None,
     "ryzenadj_source": "auto",
     "ryzenadj_download_url": "https://raw.githubusercontent.com/luisho24/AutoTDP/feature/decky-plugin/bin/ryzenadj",
 }
@@ -140,6 +142,7 @@ class Plugin:
             self._set_tdp_sync(int(config.get("ACTIVE_DEFAULT_TDP", config.get("DEFAULT_TDP", 10000))))
 
         self._restore_hhd_tdp_if_needed()
+        self._restore_asus_platform_profile_if_needed()
         decky.logger.info("AutoTDP Decky plugin unloaded")
 
     async def _uninstall(self):
@@ -155,8 +158,10 @@ class Plugin:
         self._refresh_state()
         if enabled:
             self._ensure_hhd_compatibility(force=False)
+            self._ensure_asus_platform_profile_for_autotdp()
         else:
             self._restore_hhd_tdp_if_needed()
+            self._restore_asus_platform_profile_if_needed()
         self._refresh_state()
         return self._compose_state()
 
@@ -221,6 +226,7 @@ class Plugin:
         self._refresh_state()
         if self.settings.get("enabled"):
             self._ensure_hhd_compatibility(force=False)
+            self._ensure_asus_platform_profile_for_autotdp()
         return self._compose_state()
 
     async def update_steam_ui_profile(self, patch: Dict[str, Any]) -> Dict[str, Any]:
@@ -960,6 +966,7 @@ class Plugin:
             "apu": os.path.join(root, "ppt_apu_sppt"),
             "platform": os.path.join(root, "ppt_platform_sppt"),
             "profile": "/sys/firmware/acpi/platform_profile",
+            "profile_choices": "/sys/firmware/acpi/platform_profile_choices",
         }
         values: Dict[str, Any] = {
             "available": os.path.isdir(root),
@@ -974,6 +981,44 @@ class Plugin:
                 except OSError:
                     values["values"][key] = None
         return values
+
+    def _set_platform_profile_sync(self, profile: str) -> bool:
+        path = "/sys/firmware/acpi/platform_profile"
+        if not os.path.isfile(path):
+            return False
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(profile)
+            return True
+        except OSError as error:
+            decky.logger.warning(f"Failed to set platform_profile to {profile}: {error}")
+            return False
+
+    def _ensure_asus_platform_profile_for_autotdp(self) -> None:
+        if not self.settings.get("enabled", False):
+            return
+        state = self._get_asus_wmi_state()
+        current_profile = state.get("values", {}).get("profile")
+        profile_choices_raw = state.get("values", {}).get("profile_choices") or ""
+        profile_choices = {choice.strip() for choice in profile_choices_raw.split()} if profile_choices_raw else set()
+        if not current_profile or "custom" not in profile_choices:
+            return
+        if current_profile == "custom":
+            return
+        if not self.settings.get("platform_profile_auto_changed", False):
+            self.settings["previous_platform_profile"] = current_profile
+        if self._set_platform_profile_sync("custom"):
+            self.settings["platform_profile_auto_changed"] = True
+            self._save_settings()
+
+    def _restore_asus_platform_profile_if_needed(self) -> None:
+        if not self.settings.get("platform_profile_auto_changed", False):
+            return
+        previous_profile = self.settings.get("previous_platform_profile")
+        if previous_profile and self._set_platform_profile_sync(str(previous_profile)):
+            self.settings["platform_profile_auto_changed"] = False
+            self.settings["previous_platform_profile"] = None
+            self._save_settings()
 
     def _set_asus_wmi_tdp_sync(self, value: int) -> None:
         state = self._get_asus_wmi_state()
@@ -1029,6 +1074,15 @@ class Plugin:
                 state["conflict_warning"] = "HHD TDP control is off, but HHD thermal-profile switching may still affect ASUS platform PPT behavior."
             elif state["tdp_enabled"] is True:
                 state["conflict_warning"] = "HHD TDP control is active and may override AutoTDP settings."
+
+        asus_state = self._get_asus_wmi_state()
+        current_profile = asus_state.get("values", {}).get("profile")
+        if current_profile and current_profile != "custom" and os.path.isdir("/sys/devices/platform/asus-nb-wmi"):
+            suffix = f" Current platform profile: {current_profile}."
+            if state["conflict_warning"]:
+                state["conflict_warning"] += suffix
+            else:
+                state["conflict_warning"] = f"SteamOS/ASUS thermal profile may interfere with AutoTDP.{suffix}"
 
         return state
 
@@ -1365,6 +1419,7 @@ class Plugin:
                 continue
 
             self._ensure_hhd_compatibility(force=False)
+            self._ensure_asus_platform_profile_for_autotdp()
             config = self.current_state["resolved_config"]
             await asyncio.sleep(int(config["ACTIVE_MONITOR_INTERVAL"]))
 

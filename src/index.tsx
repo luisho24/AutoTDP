@@ -807,6 +807,7 @@ function Content() {
         </PanelSectionRow>
         <SelectableInfoRow label="RyzenAdj status">{data.state.ryzenadj.test_ok ? `Ready (${data.state.ryzenadj.active_source ?? "none"})` : data.state.ryzenadj.test_error ?? "Unavailable"}</SelectableInfoRow>
         {data.state.asus_wmi?.available ? <SelectableInfoRow label="ASUS WMI power path">Active</SelectableInfoRow> : null}
+        {data.state.asus_wmi?.values?.profile ? <SelectableInfoRow label="Platform profile">{String(data.state.asus_wmi.values.profile)}</SelectableInfoRow> : null}
         {data.state.hhd.conflict_warning ? <SelectableInfoRow label="Conflict warning">{data.state.hhd.conflict_warning}</SelectableInfoRow> : null}
       </PanelSection>
 
