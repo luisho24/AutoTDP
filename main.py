@@ -33,6 +33,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 PERFORMANCE_MODES: Tuple[str, ...] = ("silent", "battery", "balanced", "performance", "turbo")
 RYZENADJ_SOURCES: Tuple[str, ...] = ("auto", "system", "bundled", "downloaded")
+EPP_OPTIONS: Tuple[str, ...] = ("performance", "balance_performance", "balance_power", "power")
+CPU_GOVERNOR_OPTIONS: Tuple[str, ...] = ("performance", "schedutil", "powersave")
 PROFILE_OVERRIDE_KEYS: Tuple[str, ...] = (
     "MIN_TDP",
     "DEFAULT_TDP",
@@ -70,6 +72,10 @@ PLUGIN_DEFAULTS: Dict[str, Any] = {
     "previous_platform_profile": None,
     "ryzenadj_source": "auto",
     "ryzenadj_download_url": "https://raw.githubusercontent.com/luisho24/AutoTDP/feature/decky-plugin/bin/ryzenadj",
+    "epp_mode": "balance_power",
+    "epp_enabled": False,
+    "cpu_governor": "schedutil",
+    "cpu_governor_enabled": False,
 }
 
 
@@ -306,6 +312,30 @@ class Plugin:
         self._refresh_state()
         return self._compose_state()
 
+    async def set_epp(self, epp_mode: str, enabled: bool) -> Dict[str, Any]:
+        if epp_mode not in EPP_OPTIONS:
+            raise ValueError(f"Unknown EPP mode: {epp_mode}")
+        self.settings["epp_mode"] = epp_mode
+        self.settings["epp_enabled"] = enabled
+        self._save_settings()
+        external_power = self._is_on_external_power()
+        if enabled:
+            await asyncio.to_thread(self._apply_governor_control, self.settings, external_power)
+        self._refresh_state()
+        return self._compose_state()
+
+    async def set_cpu_governor(self, governor: str, enabled: bool) -> Dict[str, Any]:
+        if governor not in CPU_GOVERNOR_OPTIONS:
+            raise ValueError(f"Unknown CPU governor: {governor}")
+        self.settings["cpu_governor"] = governor
+        self.settings["cpu_governor_enabled"] = enabled
+        self._save_settings()
+        external_power = self._is_on_external_power()
+        if enabled:
+            await asyncio.to_thread(self._apply_governor_control, self.settings, external_power)
+        self._refresh_state()
+        return self._compose_state()
+
     def _load_profiles(self) -> None:
         self.device_profiles = self._read_json_file(self.device_profiles_path, {"profiles": {}})
         self.game_profiles = self._read_json_file(
@@ -334,6 +364,8 @@ class Plugin:
             "settings": self.settings,
             "profiles": self._list_device_profiles(),
             "modes": list(PERFORMANCE_MODES),
+            "eppOptions": list(EPP_OPTIONS),
+            "governorOptions": list(CPU_GOVERNOR_OPTIONS),
             "gameProfiles": self.game_profiles,
             "state": self.current_state,
         }
@@ -1034,6 +1066,78 @@ class Plugin:
             except OSError as error:
                 decky.logger.warning(f"Failed to set ASUS WMI {key}: {error}")
 
+    def _get_epp_paths(self) -> List[str]:
+        paths: List[str] = []
+        base = "/sys/devices/system/cpu/cpufreq"
+        if not os.path.isdir(base):
+            return paths
+        for entry in os.listdir(base):
+            if entry.startswith("policy"):
+                epp_path = os.path.join(base, entry, "energy_performance_preference")
+                if os.path.isfile(epp_path):
+                    paths.append(epp_path)
+                else:
+                    perf_path = os.path.join(base, entry, "scaling_governor")
+                    if os.path.isfile(perf_path):
+                        paths.append(perf_path)
+        return paths
+
+    def _get_governor_paths(self) -> List[str]:
+        paths: List[str] = []
+        base = "/sys/devices/system/cpu/cpufreq"
+        if not os.path.isdir(base):
+            return paths
+        for entry in os.listdir(base):
+            if entry.startswith("policy"):
+                gov_path = os.path.join(base, entry, "scaling_governor")
+                if os.path.isfile(gov_path):
+                    paths.append(gov_path)
+        return paths
+
+    def _set_epp_sync(self, epp_value: str) -> bool:
+        paths = self._get_epp_paths()
+        if not paths:
+            return False
+        success = False
+        for path in paths:
+            try:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(epp_value)
+                success = True
+            except OSError as error:
+                decky.logger.warning(f"Failed to set EPP at {path}: {error}")
+        return success
+
+    def _set_cpu_governor_sync(self, governor: str) -> bool:
+        paths = self._get_governor_paths()
+        if not paths:
+            return False
+        success = False
+        for path in paths:
+            try:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(governor)
+                success = True
+            except OSError as error:
+                decky.logger.warning(f"Failed to set CPU governor at {path}: {error}")
+        return success
+
+    def _apply_governor_control(self, config: Dict[str, Any], external_power: bool) -> None:
+        epp_enabled = bool(self.settings.get("epp_enabled", False))
+        governor_enabled = bool(self.settings.get("cpu_governor_enabled", False))
+        if not epp_enabled and not governor_enabled:
+            return
+        if epp_enabled:
+            epp_mode = str(self.settings.get("epp_mode", "balance_power"))
+            if not external_power and epp_mode in ("performance", "balance_performance"):
+                epp_mode = "balance_power"
+            self._set_epp_sync(epp_mode)
+        if governor_enabled:
+            governor = str(self.settings.get("cpu_governor", "schedutil"))
+            if not external_power and governor == "performance":
+                governor = "schedutil"
+            self._set_cpu_governor_sync(governor)
+
     def _get_hhd_state(self) -> Dict[str, Any]:
         state = {
             "available": self._command_exists("hhdctl"),
@@ -1365,13 +1469,15 @@ class Plugin:
             adjustment_steps = 3
         elif delta > 2:
             adjustment_steps = 1
+        elif delta < -30:
+            adjustment_steps = -8
         elif delta < -20:
-            adjustment_steps = -5
-        elif delta < -10:
+            adjustment_steps = -6
+        elif delta < -12:
+            adjustment_steps = -4
+        elif delta < -6:
             adjustment_steps = -3
-        elif delta < -4:
-            adjustment_steps = -2
-        elif delta < -1.5:
+        elif delta < -2:
             adjustment_steps = -1
 
         adjusted_tdp = tdp + (adjustment_steps * step)
@@ -1461,6 +1567,7 @@ class Plugin:
                 continue
 
             await asyncio.to_thread(self._set_tdp_sync, limited_tdp)
+            self._apply_governor_control(config, external_power)
             self.current_state["current_tdp"] = limited_tdp
             self._last_adjustment = now
             await decky.emit("autotdp_state", self.current_state)

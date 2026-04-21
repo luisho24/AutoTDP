@@ -12,7 +12,7 @@ import {
   SliderField,
   ToggleField,
 } from "@decky/ui";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { FaBatteryHalf, FaBolt, FaBullseye, FaDesktop, FaGamepad, FaTachometerAlt } from "react-icons/fa";
 
 type RuntimeState = {
@@ -121,6 +121,23 @@ const updateSteamUiProfile = callable<[Record<string, string | number | boolean 
 const syncHhdTdp = callable<[boolean], DeckyState>("sync_hhd_tdp");
 const setRyzenadjSource = callable<[string], DeckyState>("set_ryzenadj_source");
 const downloadRyzenadj = callable<[], DeckyState>("download_ryzenadj");
+const setEpp = callable<[string, boolean], DeckyState>("set_epp");
+const setCpuGovernor = callable<[string, boolean], DeckyState>("set_cpu_governor");
+
+function useDebouncedCallback<T extends (...args: any[]) => any>(callback: T, delay: number): T {
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const callbackRef = useRef(callback);
+  callbackRef.current = callback;
+  const debouncedFn = useRef((...args: Parameters<T>) => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
+    timeoutRef.current = setTimeout(() => {
+      callbackRef.current(...args);
+    }, delay);
+  }) as useRef<T>;
+  return debouncedFn.current as T;
+}
 
 function labelize(value: string): string {
   return value
@@ -666,10 +683,12 @@ function Content() {
   const [quickMaxTdp, setQuickMaxTdp] = useState(20000);
   const [quickMonitorInterval, setQuickMonitorInterval] = useState(2);
   const [quickDesiredFps, setQuickDesiredFps] = useState(60);
+  const isDraggingRef = useRef(false);
+  const pendingSyncRef = useRef<(() => void) | null>(null);
 
   const applyData = (next: DeckyState, syncQuick: boolean = true) => {
     setData(next);
-    if (!syncQuick) {
+    if (!syncQuick || isDraggingRef.current) {
       return;
     }
     const quick = getQuickProfileValues(next);
@@ -678,6 +697,21 @@ function Content() {
     setQuickMaxTdp(quick.maxTdp);
     setQuickMonitorInterval(quick.monitorInterval);
     setQuickDesiredFps(quick.desiredFps);
+  };
+
+  const debouncedSetOverride = useDebouncedCallback(async (key: string, value: number | null) => {
+    isDraggingRef.current = false;
+    const next = await setProfileOverride(key, value);
+    applyData(next);
+  }, 300);
+
+  const handleSliderDragStart = () => {
+    isDraggingRef.current = true;
+  };
+
+  const handleSliderDragEnd = (key: string, value: number | null) => {
+    isDraggingRef.current = false;
+    debouncedSetOverride(key, value);
   };
 
   const refresh = async () => {
@@ -841,12 +875,12 @@ function Content() {
             showValue
             valueSuffix=" mW"
             editableValue
-            onChange={async (value) => {
+            onChange={(value) => {
               const clamped = Math.min(value, quickDefaultTdp, quickMaxTdp);
               setQuickMinTdp(clamped);
-              const next = await setProfileOverride("MIN_TDP", clamped);
-              applyData(next);
             }}
+            onFocus={() => handleSliderDragStart()}
+            onBlur={() => handleSliderDragEnd("MIN_TDP", Math.min(quickMinTdp, quickDefaultTdp, quickMaxTdp))}
           />
         </PanelSectionRow>
         <PanelSectionRow>
@@ -860,12 +894,12 @@ function Content() {
             showValue
             valueSuffix=" mW"
             editableValue
-            onChange={async (value) => {
+            onChange={(value) => {
               const clamped = Math.max(quickMinTdp, Math.min(value, quickMaxTdp));
               setQuickDefaultTdp(clamped);
-              const next = await setProfileOverride("DEFAULT_TDP", clamped);
-              applyData(next);
             }}
+            onFocus={() => handleSliderDragStart()}
+            onBlur={() => handleSliderDragEnd("DEFAULT_TDP", quickDefaultTdp)}
           />
         </PanelSectionRow>
         <PanelSectionRow>
@@ -879,12 +913,12 @@ function Content() {
             showValue
             valueSuffix=" mW"
             editableValue
-            onChange={async (value) => {
+            onChange={(value) => {
               const clamped = Math.max(value, quickDefaultTdp, quickMinTdp);
               setQuickMaxTdp(clamped);
-              const next = await setProfileOverride("MAX_CPU_TDP", clamped);
-              applyData(next);
             }}
+            onFocus={() => handleSliderDragStart()}
+            onBlur={() => handleSliderDragEnd("MAX_CPU_TDP", Math.max(quickMaxTdp, quickDefaultTdp, quickMinTdp))}
           />
         </PanelSectionRow>
         <PanelSectionRow>
@@ -899,10 +933,13 @@ function Content() {
             valueSuffix=" fps"
             editableValue
             disabled={!data.settings.desired_fps_enabled}
-            onChange={async (value) => {
+            onChange={(value) => {
               setQuickDesiredFps(value);
-              const next = await setPluginSettings({ desired_fps: value });
-              applyData(next, false);
+            }}
+            onFocus={() => handleSliderDragStart()}
+            onBlur={() => {
+              isDraggingRef.current = false;
+              setPluginSettings({ desired_fps: quickDesiredFps });
             }}
           />
         </PanelSectionRow>
