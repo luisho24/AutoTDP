@@ -76,6 +76,8 @@ PLUGIN_DEFAULTS: Dict[str, Any] = {
     "epp_enabled": False,
     "cpu_governor": "schedutil",
     "cpu_governor_enabled": False,
+    "auto_update_enabled": True,
+    "version": "1.2.3",
 }
 
 
@@ -311,6 +313,58 @@ class Plugin:
         await asyncio.to_thread(self._download_precompiled_ryzenadj)
         self._refresh_state()
         return self._compose_state()
+
+    async def check_for_update(self) -> Dict[str, Any]:
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "https://api.github.com/repos/luisho24/AutoTDP/releases/latest"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            latest = json.loads(result.stdout)
+            latest_version = latest.get("tag_name", "").lstrip("v")
+            current_version = self.settings.get("version", "0.0.0")
+            update_available = latest_version != current_version
+            return {
+                "update_available": update_available,
+                "latest_version": latest_version,
+                "current_version": current_version,
+                "release_url": latest.get("html_url", ""),
+            }
+        except Exception as e:
+            decky.logger.error(f"Failed to check for update: {e}")
+            return {
+                "update_available": False,
+                "latest_version": None,
+                "current_version": self.settings.get("version", "0.0.0"),
+                "error": str(e),
+            }
+
+    async def trigger_ota_update(self) -> Dict[str, Any]:
+        ota_script = os.path.join(self.plugin_dir, "ota_update.sh")
+        if not os.path.isfile(ota_script):
+            raise FileNotFoundError("OTA update script not found")
+        try:
+            result = subprocess.run(
+                ["bash", ota_script],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            return {
+                "success": result.returncode == 0,
+                "output": result.stdout,
+                "error": result.stderr,
+            }
+        except Exception as e:
+            decky.logger.error(f"OTA update failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+            }
 
     async def set_epp(self, epp_mode: str, enabled: bool) -> Dict[str, Any]:
         if epp_mode not in EPP_OPTIONS:

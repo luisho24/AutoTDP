@@ -180,6 +180,8 @@ const setRyzenadjSource = callable("set_ryzenadj_source");
 const downloadRyzenadj = callable("download_ryzenadj");
 callable("set_epp");
 callable("set_cpu_governor");
+const checkForUpdate = callable("check_for_update");
+const triggerOtaUpdate = callable("trigger_ota_update");
 function useDebouncedCallback(callback, delay) {
     const timeoutRef = SP_REACT.useRef(null);
     const callbackRef = SP_REACT.useRef(callback);
@@ -403,6 +405,38 @@ function AdvancedModal(props) {
             title: "Battery",
             identifier: "battery",
             content: (jsxRuntimeExports.jsx(jsxRuntimeExports.Fragment, { children: jsxRuntimeExports.jsxs(DFL.PanelSection, { title: "Battery Stats", children: [jsxRuntimeExports.jsx(SelectableInfoRow, { label: "Summary", children: batterySummary(data.state) }), jsxRuntimeExports.jsx(SelectableInfoRow, { label: "Present", children: data.state.battery.present ? "Yes" : "No" }), jsxRuntimeExports.jsxs(SelectableInfoRow, { label: "Charge", children: [data.state.battery.percent ?? "Unknown", "%"] }), jsxRuntimeExports.jsx(SelectableInfoRow, { label: "Status", children: data.state.battery.status ?? "Unknown" }), jsxRuntimeExports.jsxs(SelectableInfoRow, { label: "Power draw", children: [data.state.battery.power_w ?? "Unknown", " W"] }), jsxRuntimeExports.jsxs(SelectableInfoRow, { label: "Energy", children: [data.state.battery.energy_wh ?? "Unknown", " Wh"] }), jsxRuntimeExports.jsx(SelectableInfoRow, { label: "Time estimate", children: data.state.battery.formatted_time_remaining ?? "Unknown" }), jsxRuntimeExports.jsx(DFL.PanelSectionRow, { children: jsxRuntimeExports.jsx(DFL.ButtonItem, { label: "Refresh telemetry", description: "Poll backend again", onClick: () => void onRefresh() }) })] }) })),
+        },
+        {
+            title: "Update",
+            identifier: "update",
+            content: (jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [jsxRuntimeExports.jsxs(DFL.PanelSection, { title: "Auto-Update", children: [jsxRuntimeExports.jsx(SelectableInfoRow, { label: "Current version", children: data.settings.version ?? "Unknown" }), jsxRuntimeExports.jsx(DFL.PanelSectionRow, { children: jsxRuntimeExports.jsx(DFL.ToggleField, { label: "Auto-update on boot", description: "Check for and install updates automatically when device starts", checked: data.settings.auto_update_enabled, onChange: async (checked) => onState(await setPluginSettings({ auto_update_enabled: checked })) }) }), jsxRuntimeExports.jsx(DFL.PanelSectionRow, { children: jsxRuntimeExports.jsx(DFL.ButtonItem, { label: "Check for updates", description: "Manually check GitHub for new version", onClick: async () => {
+                                        try {
+                                            const result = await checkForUpdate();
+                                            if (result.update_available) {
+                                                onError(`Update available: v${result.latest_version}`);
+                                            }
+                                            else {
+                                                onError(`Already on latest version: v${result.current_version}`);
+                                            }
+                                        }
+                                        catch (err) {
+                                            onError(String(err));
+                                        }
+                                    } }) }), jsxRuntimeExports.jsx(DFL.PanelSectionRow, { children: jsxRuntimeExports.jsx(DFL.ButtonItem, { label: "Update now", description: "Download and install latest version from GitHub", onClick: async () => {
+                                        try {
+                                            onError("Update started. Plugin will restart...");
+                                            const result = await triggerOtaUpdate();
+                                            if (result.success) {
+                                                onError("Update successful! Plugin restarted.");
+                                            }
+                                            else {
+                                                onError(`Update failed: ${result.error}`);
+                                            }
+                                        }
+                                        catch (err) {
+                                            onError(String(err));
+                                        }
+                                    } }) })] }), jsxRuntimeExports.jsx(DFL.PanelSection, { title: "Manual Install", children: jsxRuntimeExports.jsx(DFL.PanelSectionRow, { children: jsxRuntimeExports.jsx(DFL.ButtonItem, { label: "Open GitHub releases", description: "Download latest release manually", onClick: () => DFL.Navigation.NavigateToExternalWeb("https://github.com/luisho24/AutoTDP/releases/latest") }) }) })] })),
         },
     ];
     return (jsxRuntimeExports.jsx(DFL.ModalRoot, { closeModal: onClose, onCancel: onClose, bAllowFullSize: true, bDisableBackgroundDismiss: true, children: jsxRuntimeExports.jsx(DFL.SidebarNavigation, { title: "AutoTDP Advanced", showTitle: true, pages: pages, page: requestedPage, onPageRequested: setRequestedPage }) }));

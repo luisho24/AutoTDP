@@ -123,6 +123,8 @@ const setRyzenadjSource = callable<[string], DeckyState>("set_ryzenadj_source");
 const downloadRyzenadj = callable<[], DeckyState>("download_ryzenadj");
 const setEpp = callable<[string, boolean], DeckyState>("set_epp");
 const setCpuGovernor = callable<[string, boolean], DeckyState>("set_cpu_governor");
+const checkForUpdate = callable<[], { update_available: boolean; latest_version: string | null; current_version: string; release_url: string; error?: string }>("check_for_update");
+const triggerOtaUpdate = callable<[], { success: boolean; output?: string; error?: string }>("trigger_ota_update");
 
 function useDebouncedCallback<T extends (...args: any[]) => any>(callback: T, delay: number): T {
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -660,6 +662,71 @@ function AdvancedModal(props: {
             <SelectableInfoRow label="Time estimate">{data.state.battery.formatted_time_remaining ?? "Unknown"}</SelectableInfoRow>
             <PanelSectionRow>
               <ButtonItem label="Refresh telemetry" description="Poll backend again" onClick={() => void onRefresh()} />
+            </PanelSectionRow>
+          </PanelSection>
+        </>
+      ),
+    },
+    {
+      title: "Update",
+      identifier: "update",
+      content: (
+        <>
+          <PanelSection title="Auto-Update">
+            <SelectableInfoRow label="Current version">{data.settings.version ?? "Unknown"}</SelectableInfoRow>
+            <PanelSectionRow>
+              <ToggleField
+                label="Auto-update on boot"
+                description="Check for and install updates automatically when device starts"
+                checked={data.settings.auto_update_enabled}
+                onChange={async (checked) => onState(await setPluginSettings({ auto_update_enabled: checked }))}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem
+                label="Check for updates"
+                description="Manually check GitHub for new version"
+                onClick={async () => {
+                  try {
+                    const result = await checkForUpdate();
+                    if (result.update_available) {
+                      onError(`Update available: v${result.latest_version}`);
+                    } else {
+                      onError(`Already on latest version: v${result.current_version}`);
+                    }
+                  } catch (err) {
+                    onError(String(err));
+                  }
+                }}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem
+                label="Update now"
+                description="Download and install latest version from GitHub"
+                onClick={async () => {
+                  try {
+                    onError("Update started. Plugin will restart...");
+                    const result = await triggerOtaUpdate();
+                    if (result.success) {
+                      onError("Update successful! Plugin restarted.");
+                    } else {
+                      onError(`Update failed: ${result.error}`);
+                    }
+                  } catch (err) {
+                    onError(String(err));
+                  }
+                }}
+              />
+            </PanelSectionRow>
+          </PanelSection>
+          <PanelSection title="Manual Install">
+            <PanelSectionRow>
+              <ButtonItem
+                label="Open GitHub releases"
+                description="Download latest release manually"
+                onClick={() => Navigation.NavigateToExternalWeb("https://github.com/luisho24/AutoTDP/releases/latest")}
+              />
             </PanelSectionRow>
           </PanelSection>
         </>

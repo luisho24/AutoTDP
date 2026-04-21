@@ -1,0 +1,12 @@
+[Unit]
+Description=AutoTDP OTA Update Timer
+After=network-online.target
+Wants=network-online.target
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=default.target

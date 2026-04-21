@@ -1,0 +1,15 @@
+[Unit]
+Description=AutoTDP OTA Update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/homebrew/plugins/AutoTDP/ota_update.sh
+User=%u
+Environment=HOME=%h
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
