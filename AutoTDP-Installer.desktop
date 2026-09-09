@@ -2,7 +2,7 @@
 Categories=Utility;
 Comment=Download and Install AutoTDP Script
 Comment=Download and Install AutoTDP Script
-Exec=sh -c 'wget -O /tmp/AutoTDP.sh https://raw.githubusercontent.com/luisho24/AutoTDP/main/AutoTDP.sh && wget -O /tmp/known_devices.json https://raw.githubusercontent.com/luisho24/AutoTDP/main/known_devices.json && wget -O /tmp/game_profiles.json https://raw.githubusercontent.com/luisho24/AutoTDP/main/game_profiles.json && chmod +x /tmp/AutoTDP.sh && sudo /tmp/AutoTDP.sh --install'
+Exec=sh -c 'wget -O /tmp/AutoTDP.sh https://raw.githubusercontent.com/aerodevxp/AutoTDP/main/AutoTDP.sh && wget -O /tmp/known_devices.json https://raw.githubusercontent.com/aerodevxp/AutoTDP/main/known_devices.json && wget -O /tmp/game_profiles.json https://raw.githubusercontent.com/aerodevxp/AutoTDP/main/game_profiles.json && chmod +x /tmp/AutoTDP.sh && sudo /tmp/AutoTDP.sh --install'
 GenericName=
 GenericName=
 Icon=run-install

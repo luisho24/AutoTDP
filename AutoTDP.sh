@@ -309,6 +309,20 @@ get_cpu_usage() {
     echo "$(( (busy_delta * 100) / total_delta )) $current_total $current_idle"
 }
 
+# Function to read the highest GPU utilization across all DRM cards
+get_max_gpu_usage() {
+    local max_gpu=0
+    local gpu_pct
+    for f in /sys/class/drm/card*/device/gpu_busy_percent; do
+        [[ -r "$f" ]] || continue
+        gpu_pct=$(cat "$f" 2>/dev/null) || continue
+        if (( gpu_pct > max_gpu )); then
+            max_gpu=$gpu_pct
+        fi
+    done
+    echo "$max_gpu"
+}
+
 is_on_external_power() {
     local supply
     local supply_type
@@ -851,9 +865,18 @@ apply_device_profile() {
 # Function to determine the appropriate TDP based on CPU utilization
 determine_tdp() {
     local cpu_usage=$1
+    local gpu_usage=$2
+    local effective_usage
     local tdp=$MIN_TDP
     local i
     local threshold
+
+    # Use whichever is higher - CPU or GPU
+    if (( gpu_usage > cpu_usage )); then
+        effective_usage=$gpu_usage
+    else
+        effective_usage=$cpu_usage
+    fi
 
     local tdp_values=($MIN_TDP $((ACTIVE_MAX_TDP * 1 / 8)) $((ACTIVE_MAX_TDP * 1 / 4)) $((ACTIVE_MAX_TDP * 3 / 8)) \
                 $((ACTIVE_MAX_TDP * 1 / 2)) $((ACTIVE_MAX_TDP * 5 / 8)) $((ACTIVE_MAX_TDP * 3 / 4)) \
@@ -869,7 +892,7 @@ determine_tdp() {
             threshold=100
         fi
 
-        if (( cpu_usage > threshold )); then
+        if (( effective_usage > threshold )); then
             tdp=${tdp_values[$i]}
         fi
     done
@@ -884,6 +907,7 @@ monitor_and_adjust() {
     local previous_total
     local previous_idle
     local cpu_usage
+    local gpu_usage
     local new_tdp
     local limited_tdp
     local candidate_tdp=$ACTIVE_DEFAULT_TDP
@@ -902,10 +926,13 @@ monitor_and_adjust() {
         # Get CPU utilization over the sampling window
         read -r cpu_usage previous_total previous_idle < <(get_cpu_usage "$previous_total" "$previous_idle")
 
-        log "Current CPU usage: ${cpu_usage}%"
+        # Get max GPU utilization across all cards
+        gpu_usage=$(get_max_gpu_usage)
 
-        # Determine the new TDP and apply handheld-friendly battery cap if needed
-        new_tdp=$(determine_tdp "$cpu_usage")
+        log "Current CPU usage: ${cpu_usage}% | GPU usage: ${gpu_usage}%"
+
+        # Determine the new TDP based on whichever is higher
+        new_tdp=$(determine_tdp "$cpu_usage" "$gpu_usage")
         limited_tdp=$(apply_power_source_limit "$new_tdp")
 
         if [[ $limited_tdp == "$current_tdp" ]]; then
