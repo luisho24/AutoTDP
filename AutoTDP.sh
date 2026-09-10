@@ -65,7 +65,9 @@ ACTIVE_STABLE_SAMPLE_COUNT=$STABLE_SAMPLE_COUNT
 ACTIVE_THRESHOLD_OFFSET=0
 
 SERVICE_FILE="/etc/systemd/system/autotdp.service"
-SCRIPT_DEST="/usr/local/bin/autotdp.sh"  # Destination for the script copy
+SCRIPT_DEST="/usr/local/bin/autotdp.sh"
+UPDATE_URL="https://raw.githubusercontent.com/aerodevxp/AutoTDP/refs/heads/main/AutoTDP.sh"
+UPDATE_CHECK_INTERVAL=21600  # Check for updates every 6 hours
 
 print_usage() {
     cat <<EOF
@@ -73,6 +75,7 @@ Usage: $0 [options]
 
 Options:
   --install                 Install AutoTDP as a systemd service
+  --update                  Check for and install script updates from the aerodevxp repo
   --mode <name>             Run with a temporary mode override
   --set-mode <name>         Persist the selected mode to the config file
   --profile <name>          Run with a temporary device profile override
@@ -95,6 +98,9 @@ parse_arguments() {
                 ;;
             --install)
                 ACTION="install"
+                ;;
+            --update)
+                ACTION="update"
                 ;;
             --mode)
                 CLI_MODE_OVERRIDE=${2:-}
@@ -936,6 +942,12 @@ monitor_and_adjust() {
             resolve_active_game_profile
         fi
 
+        #check for update
+        if (( $(date +%s) - last_update_check >= UPDATE_CHECK_INTERVAL )); then
+            last_update_check=$(date +%s)
+            perform_self_update || true
+        fi
+
         # Sub-sample within the interval to catch short CPU bursts
         cpu_peak=0
         core_breadth=0
@@ -962,6 +974,23 @@ monitor_and_adjust() {
 
         new_tdp=$(determine_tdp "$cpu_signal" "$gpu_usage")
         limited_tdp=$new_tdp
+
+        # Burst cap: narrow loads (bursts / single-thread) top out at 75% of the
+        # ceiling; full TDP is reserved for broad multi-core demand.
+        if (( core_breadth < 3 )); then
+            if is_on_external_power; then
+                burst_cap=$ACTIVE_MAX_TDP
+            else
+                burst_cap=$ACTIVE_BATTERY_MAX_TDP
+            fi
+            burst_cap=$(( (burst_cap * 75 / 100 / STEP_TDP) * STEP_TDP ))
+            if (( burst_cap < MIN_TDP )); then
+                burst_cap=$MIN_TDP
+            fi
+            if (( limited_tdp > burst_cap )); then
+                limited_tdp=$burst_cap
+            fi
+        fi
 
         if [[ $limited_tdp == "$current_tdp" ]]; then
             candidate_tdp=$limited_tdp
@@ -1052,6 +1081,56 @@ EOF
     run_privileged systemctl restart autotdp.service
 
     log "AutoTDP service installed and started"
+}
+
+download_file() {
+    local url=$1
+    local dest=$2
+
+    if command -v curl > /dev/null 2>&1; then
+        curl -fsSL --connect-timeout 10 --max-time 60 "$url" -o "$dest"
+    elif command -v wget > /dev/null 2>&1; then
+        wget -q --timeout=60 -O "$dest" "$url"
+    else
+        return 1
+    fi
+}
+
+perform_self_update() {
+    local tmp_file
+
+    tmp_file=$(mktemp)
+
+    if ! download_file "$UPDATE_URL" "$tmp_file"; then
+        rm -f "$tmp_file"
+        log "Self-update: download failed, keeping current version"
+        return 1
+    fi
+
+    # Validate: non-empty, looks like AutoTDP, parses as valid bash
+    if [[ ! -s "$tmp_file" ]] || ! grep -q "AutoTDP" "$tmp_file" || ! bash -n "$tmp_file"; then
+        rm -f "$tmp_file"
+        log "Self-update: downloaded file failed validation, keeping current version"
+        return 1
+    fi
+
+    if [[ -f "$SCRIPT_DEST" ]] && cmp -s "$tmp_file" "$SCRIPT_DEST"; then
+        rm -f "$tmp_file"
+        return 0
+    fi
+
+    run_privileged install -m 0755 "$tmp_file" "$SCRIPT_DEST"
+    rm -f "$tmp_file"
+    log "Self-update: new version installed to $SCRIPT_DEST"
+
+    if command -v systemctl > /dev/null 2>&1 && [[ -f "$SERVICE_FILE" ]] \
+        && systemctl is-active --quiet autotdp.service; then
+        log "Self-update: restarting autotdp.service"
+        run_privileged systemctl restart autotdp.service
+        exit 0
+    fi
+
+    return 0
 }
 
 create_default_config() {
@@ -1219,6 +1298,12 @@ if [[ $ACTION == "install" ]]; then
     SKIP_CLEANUP=1
     install_service
     exit 0
+fi
+
+if [[ $ACTION == "update" ]]; then
+    SKIP_CLEANUP=1
+    perform_self_update
+    exit $?
 fi
 
 # Start monitoring and adjusting TDP
