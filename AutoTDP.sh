@@ -273,43 +273,44 @@ set_tdp() {
     fi
 }
 
-# Function to read cumulative CPU time counters from /proc/stat
-read_cpu_times() {
-    local cpu user nice system idle iowait irq softirq steal guest guest_nice
-    read -r cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
-
-    local total=$((user + nice + system + idle + iowait + irq + softirq + steal))
-    local idle_total=$((idle + iowait))
-
-    echo "$total $idle_total"
+# Reads per-core cumulative CPU times as a single snapshot string
+read_core_snapshot() {
+    awk '/^cpu[0-9]+/ {printf "%s %s ", $2+$3+$4+$5+$6+$7+$8+$9, $6+$7} END {print ""}' /proc/stat
 }
 
-# Function to calculate CPU utilization percentage from two /proc/stat samples
-get_cpu_usage() {
-    local previous_total=$1
-    local previous_idle=$2
-    local current_total
-    local current_idle
-    local total_delta
-    local idle_delta
-    local busy_delta
+# Computes the busiest single core's busy percentage against the previous snapshot.
+# Echoes: "max_pct new_snapshot"
+get_max_cpu_usage() {
+    local previous=$1
+    local current
+    local max=0
+    local i n td id busy pct
+    local -a pts cts
 
-    read -r current_total current_idle < <(read_cpu_times)
+    current=$(read_core_snapshot)
 
-    total_delta=$((current_total - previous_total))
-    idle_delta=$((current_idle - previous_idle))
+    read -r -a pts <<< "$previous"
+    read -r -a cts <<< "$current"
 
-    if (( total_delta <= 0 )); then
-        echo "0 $current_total $current_idle"
-        return
+    n=$(( ${#cts[@]} / 2 ))
+
+    if (( ${#pts[@]} == ${#cts[@]} && n > 0 )); then
+        for ((i=0; i<n; i++)); do
+            td=$(( ${cts[i*2]} - ${pts[i*2]} ))
+            id=$(( ${cts[i*2+1]} - ${pts[i*2+1]} ))
+            if (( td <= 0 )); then
+                continue
+            fi
+            busy=$((td - id))
+            (( busy < 0 )) && busy=0
+            pct=$(( busy * 100 / td ))
+            if (( pct > max )); then
+                max=$pct
+            fi
+        done
     fi
 
-    busy_delta=$((total_delta - idle_delta))
-    if (( busy_delta < 0 )); then
-        busy_delta=0
-    fi
-
-    echo "$(( (busy_delta * 100) / total_delta )) $current_total $current_idle"
+    echo "$max $current"
 }
 
 # Function to read the highest GPU utilization across all DRM cards
@@ -925,8 +926,7 @@ determine_tdp() {
 monitor_and_adjust() {
     local last_adjustment=0
     local current_tdp=$ACTIVE_DEFAULT_TDP
-    local previous_total
-    local previous_idle
+    local prev_snapshot
     local cpu_usage
     local gpu_usage
     local new_tdp
@@ -934,7 +934,7 @@ monitor_and_adjust() {
     local candidate_tdp=$ACTIVE_DEFAULT_TDP
     local stable_samples=0
 
-    read -r previous_total previous_idle < <(read_cpu_times)
+    read -r _ prev_snapshot < <(get_max_cpu_usage "")
 
     resolve_active_game_profile
 
@@ -944,8 +944,8 @@ monitor_and_adjust() {
         resolve_active_game_profile
         sleep "$ACTIVE_MONITOR_INTERVAL"
 
-        # Get CPU utilization over the sampling window
-        read -r cpu_usage previous_total previous_idle < <(get_cpu_usage "$previous_total" "$previous_idle")
+        # Get busiest core CPU utilization over the sampling window
+        read -r cpu_usage prev_snapshot < <(get_max_cpu_usage "$prev_snapshot")
 
         # Get max GPU utilization across all cards
         gpu_usage=$(get_max_gpu_usage)
@@ -1026,7 +1026,7 @@ EOF
 
     run_privileged systemctl daemon-reload
     run_privileged systemctl enable autotdp.service
-    run_privileged systemctl start autotdp.service
+    run_privileged systemctl restart autotdp.service
 
     log "AutoTDP service installed and started"
 }
