@@ -867,9 +867,12 @@ determine_tdp() {
     local cpu_usage=$1
     local gpu_usage=$2
     local effective_usage
-    local tdp=$MIN_TDP
-    local i
-    local threshold
+    local ceiling
+    local tdp
+    local ramp_start=25
+    local ramp_full=95
+    local usage_span
+    local usage_above_floor
 
     # Use whichever is higher - CPU or GPU
     if (( gpu_usage > cpu_usage )); then
@@ -878,24 +881,37 @@ determine_tdp() {
         effective_usage=$cpu_usage
     fi
 
-    local tdp_values=($MIN_TDP $((ACTIVE_MAX_TDP * 1 / 8)) $((ACTIVE_MAX_TDP * 1 / 4)) $((ACTIVE_MAX_TDP * 3 / 8)) \
-                $((ACTIVE_MAX_TDP * 1 / 2)) $((ACTIVE_MAX_TDP * 5 / 8)) $((ACTIVE_MAX_TDP * 3 / 4)) \
-                $((ACTIVE_MAX_TDP * 7 / 8)) $ACTIVE_MAX_TDP)
+    # Apply the mode's threshold offset (positive = lazier ramp, negative = earlier ramp)
+    effective_usage=$(( effective_usage - ACTIVE_THRESHOLD_OFFSET ))
+    if (( effective_usage < 0 )); then
+        effective_usage=0
+    fi
 
-    local cpu_load_thresholds=(0 10 20 30 40 50 60 70 80)
+    # Pick the ceiling based on power source
+    if is_on_external_power; then
+        ceiling=$ACTIVE_MAX_TDP
+    else
+        ceiling=$ACTIVE_BATTERY_MAX_TDP
+    fi
 
-    for i in "${!cpu_load_thresholds[@]}"; do
-        threshold=$((cpu_load_thresholds[i] + ACTIVE_THRESHOLD_OFFSET))
-        if (( threshold < 0 )); then
-            threshold=0
-        elif (( threshold > 100 )); then
-            threshold=100
+    if (( effective_usage <= ramp_start )); then
+        tdp=$MIN_TDP
+    else
+        usage_span=$(( ramp_full - ramp_start ))
+        usage_above_floor=$(( effective_usage - ramp_start ))
+        if (( usage_above_floor > usage_span )); then
+            usage_above_floor=$usage_span
         fi
+        tdp=$(( MIN_TDP + (ceiling - MIN_TDP) * usage_above_floor / usage_span ))
+    fi
 
-        if (( effective_usage > threshold )); then
-            tdp=${tdp_values[$i]}
-        fi
-    done
+    # Enforce floor and ceiling
+    if (( tdp < MIN_TDP )); then
+        tdp=$MIN_TDP
+    fi
+    if (( tdp > ceiling )); then
+        tdp=$ceiling
+    fi
 
     echo $(( (tdp / STEP_TDP) * STEP_TDP ))
 }
@@ -933,7 +949,7 @@ monitor_and_adjust() {
 
         # Determine the new TDP based on whichever is higher
         new_tdp=$(determine_tdp "$cpu_usage" "$gpu_usage")
-        limited_tdp=$(apply_power_source_limit "$new_tdp")
+        limited_tdp=$new_tdp
 
         if [[ $limited_tdp == "$current_tdp" ]]; then
             candidate_tdp=$limited_tdp
