@@ -887,8 +887,10 @@ determine_tdp() {
     # Pick the ceiling based on power source
     if is_on_external_power; then
         ceiling=$ACTIVE_MAX_TDP
+        ramp_start=20
     else
         ceiling=$ACTIVE_BATTERY_MAX_TDP
+        ramp_start=30
     fi
 
     if (( effective_usage <= ramp_start )); then
