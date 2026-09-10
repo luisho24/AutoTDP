@@ -569,32 +569,21 @@ detect_steam_appid_from_environment() {
 }
 
 detect_steam_appid_from_processes() {
-    local pid
-    local candidate
-
+    local pid env_data
     for pid_path in /proc/[0-9]*; do
         pid=${pid_path##*/}
         [[ -r "/proc/$pid/environ" ]] || continue
+        env_data=$(tr '\0' '\n' < "/proc/$pid/environ" 2> /dev/null)
 
-        candidate=$(read_env_value_from_pid "$pid" "SteamAppId")
-        if [[ -n "$candidate" && "$candidate" != "0" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-
-        candidate=$(read_env_value_from_pid "$pid" "SteamGameId")
-        if [[ -n "$candidate" && "$candidate" != "0" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-
-        candidate=$(read_env_value_from_pid "$pid" "STEAM_COMPAT_APP_ID")
-        if [[ -n "$candidate" && "$candidate" != "0" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
+        for key in SteamAppId SteamGameId STEAM_COMPAT_APP_ID; do
+            local candidate
+            candidate=$(printf '%s\n' "$env_data" | awk -F= -v k="$key" '$1 == k {print $2; exit}')
+            if [[ -n "$candidate" && "$candidate" != "0" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
     done
-
     return 1
 }
 
@@ -929,6 +918,7 @@ monitor_and_adjust() {
     local prev_snapshot
     local cpu_usage
     local gpu_usage
+    local cycle=0
     local new_tdp
     local limited_tdp
     local candidate_tdp=$ACTIVE_DEFAULT_TDP
@@ -936,12 +926,17 @@ monitor_and_adjust() {
 
     read -r _ prev_snapshot < <(get_max_cpu_usage "")
 
-    resolve_active_game_profile
+    set_tdp "$ACTIVE_DEFAULT_TDP"
+    current_tdp=$ACTIVE_DEFAULT_TDP
+    last_adjustment=$(date +%s)
 
     log "Monitoring and adjusting TDP started"
 
     while true; do
-        resolve_active_game_profile
+        cycle=$((cycle + 1))
+        if (( cycle % 5 == 1 )); then
+            resolve_active_game_profile
+        fi
         sleep "$ACTIVE_MONITOR_INTERVAL"
 
         # Get busiest core CPU utilization over the sampling window
