@@ -22,7 +22,7 @@ STEP_TDP=1000  # Step increment for TDP adjustments
 
 RYZENADJ_EXEC=ryzenadj
 RYZENADJ_DELAY=4  # Delay in seconds between adjustments
-MONITOR_INTERVAL=5
+MONITOR_INTERVAL=3
 STABLE_SAMPLE_COUNT=2
 BATTERY_MAX_TDP=$MAX_CPU_TDP
 DEVICE_PROFILE="generic"
@@ -279,13 +279,12 @@ read_core_snapshot() {
 }
 
 # Computes the busiest single core's busy percentage against the previous snapshot.
-# Echoes: "max_pct new_snapshot"
 get_max_cpu_usage() {
     local previous=$1
     local current
-    local max=0
+    local metric=0
     local i n td id busy pct
-    local -a pts cts
+    local -a pts cts pcts
 
     current=$(read_core_snapshot)
 
@@ -304,13 +303,15 @@ get_max_cpu_usage() {
             busy=$((td - id))
             (( busy < 0 )) && busy=0
             pct=$(( busy * 100 / td ))
-            if (( pct > max )); then
-                max=$pct
-            fi
+            pcts+=("$pct")
         done
+
+        if (( ${#pcts[@]} > 0 )); then
+            metric=$(printf '%s\n' "${pcts[@]}" | sort -rn | head -4 | awk '{s+=$1} END {printf "%d", (NR > 0) ? s / NR : 0}')
+        fi
     fi
 
-    echo "$max $current"
+    echo "$metric $current"
 }
 
 # Function to read the highest GPU utilization across all DRM cards
