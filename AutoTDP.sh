@@ -352,20 +352,6 @@ is_on_external_power() {
     return 1
 }
 
-apply_power_source_limit() {
-    local requested_tdp=$1
-
-    if is_on_external_power; then
-        echo "$requested_tdp"
-    else
-        if (( requested_tdp > ACTIVE_BATTERY_MAX_TDP )); then
-            echo "$ACTIVE_BATTERY_MAX_TDP"
-        else
-            echo "$requested_tdp"
-        fi
-    fi
-}
-
 validate_performance_mode() {
     case "$1" in
         silent|battery|balanced|performance|turbo)
@@ -935,8 +921,6 @@ monitor_and_adjust() {
     local limited_tdp
     local candidate_tdp=$ACTIVE_DEFAULT_TDP
     local stable_samples=0
-    last_high_seen=$(date +%s)
-    local now
 
     read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
 
@@ -969,14 +953,13 @@ monitor_and_adjust() {
 
         log "Current CPU usage: ${cpu_usage}% | GPU usage: ${gpu_usage}%"
 
-        # Narrow loads (1-2 busy cores): mostly trust top4, small dose of peak
-        if (( core_breadth < 3 )); then
-            cpu_signal=$(( cpu_usage + (cpu_peak - cpu_usage) / 4 ))
-        else
-            cpu_signal=$cpu_peak
+        cpu_signal=$cpu_peak
+
+        if (( $(date +%s) - last_adjustment > 300 )); then
+            set_tdp "$current_tdp"
+            last_adjustment=$(date +%s)
         fi
 
-        now=$(date +%s)
         # Any sign of real demand resets the down-ramp hold timer
         if (( cpu_signal > 40 || gpu_usage > 40 )); then
             last_high_seen=$now
@@ -1007,9 +990,13 @@ monitor_and_adjust() {
             continue
         fi
 
-        # Down-ramp hold: only lower TDP after 30s without a demand spike
-        if (( candidate_tdp < current_tdp && (now - last_high_seen) < 30 )); then
-            continue
+        # Down-ramp rate limit: descend at most 2W per adjustment
+        if (( candidate_tdp < current_tdp )); then
+            local down_step=2
+            is_on_external_power || down_step=1
+            if (( current_tdp - candidate_tdp > down_step * STEP_TDP )); then
+                candidate_tdp=$(( current_tdp - down_step * STEP_TDP ))
+            fi
         fi
 
         # Narrow loads may only climb 2W per adjustment; broad loads can jump freely
