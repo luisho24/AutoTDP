@@ -263,6 +263,9 @@ check_packages() {
 # Function to set TDP values
 set_tdp() {
     local value=$1
+    if (( value < BASE_MIN_TDP )); then
+        value=$BASE_MIN_TDP
+    fi
     if run_privileged "$RYZENADJ_EXEC" --stapm-limit "$value" --fast-limit "$value" --slow-limit "$value"; then
         log "TDP set to $value"
     else
