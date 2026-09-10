@@ -938,13 +938,15 @@ monitor_and_adjust() {
         if (( cycle % 5 == 1 )); then
             resolve_active_game_profile
         fi
-        sleep "$ACTIVE_MONITOR_INTERVAL"
-
-        # Get busiest core CPU utilization over the sampling window
-        read -r cpu_usage prev_snapshot < <(get_max_cpu_usage "$prev_snapshot")
-
-        # Get max GPU utilization across all cards
-        gpu_usage=$(get_max_gpu_usage)
+        cpu_usage=0
+        gpu_usage=0
+        for (( sub=0; sub < ACTIVE_MONITOR_INTERVAL * 2; sub++ )); do
+            sleep 0.5
+            read -r sub_cpu prev_snapshot < <(get_max_cpu_usage "$prev_snapshot")
+            (( sub_cpu > cpu_usage )) && cpu_usage=$sub_cpu
+            sub_gpu=$(get_max_gpu_usage)
+            (( sub_gpu > gpu_usage )) && gpu_usage=$sub_gpu
+        done
 
         log "Current CPU usage: ${cpu_usage}% | GPU usage: ${gpu_usage}%"
 
