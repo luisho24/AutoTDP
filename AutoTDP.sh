@@ -935,6 +935,8 @@ monitor_and_adjust() {
     local limited_tdp
     local candidate_tdp=$ACTIVE_DEFAULT_TDP
     local stable_samples=0
+    local last_high_seen=0
+    local now
 
     read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
 
@@ -967,6 +969,12 @@ monitor_and_adjust() {
 
         log "Current CPU usage: ${cpu_usage}% | GPU usage: ${gpu_usage}%"
 
+        now=$(date +%s)
+        # Any sign of real demand resets the down-ramp hold timer
+        if (( cpu_signal > 40 || gpu_usage > 40 )); then
+            last_high_seen=$now
+        fi
+
         # Narrow loads (1-2 busy cores): mostly trust top4, small dose of peak
         if (( core_breadth < 3 )); then
             cpu_signal=$(( cpu_usage + (cpu_peak - cpu_usage) / 4 ))
@@ -996,6 +1004,11 @@ monitor_and_adjust() {
 
         if (( stable_samples < ACTIVE_STABLE_SAMPLE_COUNT )); then
             log "Candidate TDP $candidate_tdp waiting for stability ($stable_samples/$ACTIVE_STABLE_SAMPLE_COUNT)"
+            continue
+        fi
+
+        # Down-ramp hold: only lower TDP after 10s without a demand spike
+        if (( candidate_tdp < current_tdp && (now - last_high_seen) < 10 )); then
             continue
         fi
 
