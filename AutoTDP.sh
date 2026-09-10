@@ -275,7 +275,7 @@ set_tdp() {
 
 # Reads per-core cumulative CPU times as a single snapshot string
 read_core_snapshot() {
-    awk '/^cpu[0-9]+/ {printf "%s %s ", $2+$3+$4+$5+$6+$7+$8+$9, $6+$7} END {print ""}' /proc/stat
+    awk '/^cpu[0-9]+/ {printf "%s %s ", $2+$3+$4+$5+$6+$7+$8+$9, $5+$6} END {print ""}' /proc/stat
 }
 
 # Computes the busiest single core's busy percentage against the previous snapshot.
