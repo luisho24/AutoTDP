@@ -960,11 +960,6 @@ monitor_and_adjust() {
             last_adjustment=$(date +%s)
         fi
 
-        # Any sign of real demand resets the down-ramp hold timer
-        if (( cpu_signal > 40 || gpu_usage > 40 )); then
-            last_high_seen=$now
-        fi
-
         new_tdp=$(determine_tdp "$cpu_signal" "$gpu_usage")
         limited_tdp=$new_tdp
 
