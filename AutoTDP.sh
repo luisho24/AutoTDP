@@ -282,7 +282,7 @@ read_core_snapshot() {
 get_max_cpu_usage() {
     local previous=$1
     local current
-    local metric=0
+    local top4=0 peak=0 breadth=0
     local i n td id busy pct
     local -a pts cts pcts
 
@@ -304,14 +304,16 @@ get_max_cpu_usage() {
             (( busy < 0 )) && busy=0
             pct=$(( busy * 100 / td ))
             pcts+=("$pct")
+            (( pct > peak )) && peak=$pct
+            (( pct >= 40 )) && breadth=$((breadth + 1))
         done
 
         if (( ${#pcts[@]} > 0 )); then
-            metric=$(printf '%s\n' "${pcts[@]}" | sort -rn | head -4 | awk '{s+=$1} END {printf "%d", (NR > 0) ? s / NR : 0}')
+            top4=$(printf '%s\n' "${pcts[@]}" | sort -rn | head -4 | awk '{s+=$1} END {printf "%d", s / NR}')
         fi
     fi
 
-    echo "$metric $current"
+    echo "$top4 $breadth $peak $current"
 }
 
 # Function to read the highest GPU utilization across all DRM cards
@@ -863,7 +865,7 @@ determine_tdp() {
     local effective_usage
     local ceiling
     local tdp
-    local ramp_start=25
+    local ramp_start=20
     local ramp_full=95
     local curve_exponent=2
     local usage_span
@@ -918,6 +920,13 @@ monitor_and_adjust() {
     local current_tdp=$ACTIVE_DEFAULT_TDP
     local prev_snapshot
     local cpu_usage
+    local core_breadth
+    local cpu_peak
+    local cpu_signal
+    local sub_cpu
+    local sub_breadth
+    local sub_peak
+    local sub_gpu
     local gpu_usage
     local cycle=0
     local new_tdp
@@ -925,7 +934,7 @@ monitor_and_adjust() {
     local candidate_tdp=$ACTIVE_DEFAULT_TDP
     local stable_samples=0
 
-    read -r _ prev_snapshot < <(get_max_cpu_usage "")
+    read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
 
     set_tdp "$ACTIVE_DEFAULT_TDP"
     current_tdp=$ACTIVE_DEFAULT_TDP
@@ -938,20 +947,32 @@ monitor_and_adjust() {
         if (( cycle % 5 == 1 )); then
             resolve_active_game_profile
         fi
-        cpu_usage=0
+
+        # Sub-sample within the interval to catch short CPU bursts
+        cpu_peak=0
+        core_breadth=0
         gpu_usage=0
         for (( sub=0; sub < ACTIVE_MONITOR_INTERVAL * 2; sub++ )); do
             sleep 0.5
-            read -r sub_cpu prev_snapshot < <(get_max_cpu_usage "$prev_snapshot")
-            (( sub_cpu > cpu_usage )) && cpu_usage=$sub_cpu
+            read -r sub_cpu sub_breadth sub_peak prev_snapshot < <(get_max_cpu_usage "$prev_snapshot")
+            (( sub_cpu > cpu_peak )) && cpu_peak=$sub_cpu
+            (( sub_breadth > core_breadth )) && core_breadth=$sub_breadth
             sub_gpu=$(get_max_gpu_usage)
             (( sub_gpu > gpu_usage )) && gpu_usage=$sub_gpu
         done
 
+        cpu_usage=$cpu_peak
+
         log "Current CPU usage: ${cpu_usage}% | GPU usage: ${gpu_usage}%"
 
-        # Determine the new TDP based on whichever is higher
-        new_tdp=$(determine_tdp "$cpu_usage" "$gpu_usage")
+        # Narrow loads (1-2 busy cores): mostly trust top4, small dose of peak
+        if (( core_breadth < 3 )); then
+            cpu_signal=$(( cpu_usage + (cpu_peak - cpu_usage) / 4 ))
+        else
+            cpu_signal=$cpu_peak
+        fi
+
+        new_tdp=$(determine_tdp "$cpu_signal" "$gpu_usage")
         limited_tdp=$new_tdp
 
         if [[ $limited_tdp == "$current_tdp" ]]; then
@@ -974,6 +995,13 @@ monitor_and_adjust() {
         if (( stable_samples < ACTIVE_STABLE_SAMPLE_COUNT )); then
             log "Candidate TDP $candidate_tdp waiting for stability ($stable_samples/$ACTIVE_STABLE_SAMPLE_COUNT)"
             continue
+        fi
+
+        # Narrow loads may only climb 2W per adjustment; broad loads can jump freely
+        if (( candidate_tdp > current_tdp && core_breadth < 3 )); then
+            if (( candidate_tdp - current_tdp > 2 * STEP_TDP )); then
+                candidate_tdp=$(( current_tdp + 2 * STEP_TDP ))
+            fi
         fi
 
         if (( $(($(date +%s) - last_adjustment)) >= ACTIVE_RYZENADJ_DELAY )); then
