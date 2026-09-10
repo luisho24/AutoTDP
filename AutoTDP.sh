@@ -874,6 +874,7 @@ determine_tdp() {
     local tdp
     local ramp_start=25
     local ramp_full=95
+    local curve_exponent=2
     local usage_span
     local usage_above_floor
 
@@ -884,7 +885,7 @@ determine_tdp() {
         effective_usage=$cpu_usage
     fi
 
-    # Apply the mode's threshold offset (positive = lazier ramp, negative = earlier ramp)
+    # Apply the mode's threshold offset
     effective_usage=$(( effective_usage - ACTIVE_THRESHOLD_OFFSET ))
     if (( effective_usage < 0 )); then
         effective_usage=0
@@ -905,7 +906,7 @@ determine_tdp() {
         if (( usage_above_floor > usage_span )); then
             usage_above_floor=$usage_span
         fi
-        tdp=$(( MIN_TDP + (ceiling - MIN_TDP) * usage_above_floor / usage_span ))
+        tdp=$(( MIN_TDP + (ceiling - MIN_TDP) * usage_above_floor ** curve_exponent / usage_span ** curve_exponent ))
     fi
 
     # Enforce floor and ceiling
@@ -918,6 +919,7 @@ determine_tdp() {
 
     echo $(( (tdp / STEP_TDP) * STEP_TDP ))
 }
+
 
 # Function to monitor and adjust TDP based on CPU utilization
 monitor_and_adjust() {
