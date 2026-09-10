@@ -969,17 +969,17 @@ monitor_and_adjust() {
 
         log "Current CPU usage: ${cpu_usage}% | GPU usage: ${gpu_usage}%"
 
-        now=$(date +%s)
-        # Any sign of real demand resets the down-ramp hold timer
-        if (( cpu_signal > 40 || gpu_usage > 40 )); then
-            last_high_seen=$now
-        fi
-
         # Narrow loads (1-2 busy cores): mostly trust top4, small dose of peak
         if (( core_breadth < 3 )); then
             cpu_signal=$(( cpu_usage + (cpu_peak - cpu_usage) / 4 ))
         else
             cpu_signal=$cpu_peak
+        fi
+
+        now=$(date +%s)
+        # Any sign of real demand resets the down-ramp hold timer
+        if (( cpu_signal > 40 || gpu_usage > 40 )); then
+            last_high_seen=$now
         fi
 
         new_tdp=$(determine_tdp "$cpu_signal" "$gpu_usage")
