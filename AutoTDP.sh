@@ -927,6 +927,7 @@ monitor_and_adjust() {
     local limited_tdp
     local candidate_tdp=$ACTIVE_DEFAULT_TDP
     local stable_samples=0
+    local last_update_check=0
 
     read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
 
@@ -945,7 +946,11 @@ monitor_and_adjust() {
         #check for update
         if (( $(date +%s) - last_update_check >= UPDATE_CHECK_INTERVAL )); then
             last_update_check=$(date +%s)
-            perform_self_update || true
+            if download_file "$UPDATE_URL" /tmp/autotdp_check.sh 2>/dev/null \
+                && ! cmp -s /tmp/autotdp_check.sh "$SCRIPT_DEST"; then
+                log "Update available upstream - run: $0 --update"
+            fi
+            rm -f /tmp/autotdp_check.sh
         fi
 
         # Sub-sample within the interval to catch short CPU bursts
