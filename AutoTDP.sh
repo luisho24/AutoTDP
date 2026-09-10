@@ -961,7 +961,11 @@ monitor_and_adjust() {
             stable_samples=$((stable_samples + 1))
         else
             candidate_tdp=$limited_tdp
-            stable_samples=1
+            if (( candidate_tdp > current_tdp )); then
+                stable_samples=$ACTIVE_STABLE_SAMPLE_COUNT
+            else
+                stable_samples=1
+            fi
         fi
 
         if (( stable_samples < ACTIVE_STABLE_SAMPLE_COUNT )); then
