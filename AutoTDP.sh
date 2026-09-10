@@ -879,11 +879,11 @@ determine_tdp() {
     local usage_span
     local usage_above_floor
 
-    # Use whichever is higher - CPU or GPU
-    if (( gpu_usage > cpu_usage )); then
-        effective_usage=$gpu_usage
-    else
-        effective_usage=$cpu_usage
+    # Combine CPU and GPU demand: union formula accounts for both running together.
+    # Both 40% -> 64%, one pegged 99% -> ~99%, both 70% -> 91%.
+    effective_usage=$(( cpu_usage + gpu_usage - (cpu_usage * gpu_usage + 50) / 100 ))
+    if (( effective_usage > 100 )); then
+        effective_usage=100
     fi
 
     # Apply the mode's threshold offset
