@@ -1,11 +1,12 @@
 # AutoTDP
 
-AutoTDP is a Bash script that adjusts AMD APU TDP dynamically with `ryzenadj`. It is designed for Linux handheld PCs and AMD laptops, and uses real CPU utilization instead of raw load average, which gives more stable behavior on devices like Steam Deck, ROG Ally, Legion Go, Framework laptops and other Ryzen-based systems.
+AutoTDP is a Bash script that adjusts AMD APU TDP dynamically with `ryzenadj` based on % of your SOC used. It is designed for Linux handheld PCs and AMD laptops, and uses real CPU and GPU utilization.
 
 ## Features
 
-- Uses CPU utilization sampled from `/proc/stat` instead of relying on `loadavg`
+- Uses Peak CPU Core AND GPU utilization sampled from `/proc/stat` instead of relying on `loadavg`
 - Reduces TDP oscillation with a stable-sample requirement before applying changes
+- TDP will max out for loading and installing games for lightning fast data transfer (temporarily when one CPU core is at peak usage, then slowly ramps back down)
 - Supports an optional battery cap for handheld-friendly behavior away from the charger
 - Loads device-specific presets from `known_devices.json`
 - Includes presets for AMD handhelds and AMD laptops
@@ -32,14 +33,8 @@ That means the script can run on CachyOS, SteamOS, Bazzite, Nobara, Arch, Fedora
 
 Install these commands on your system:
 
-- `bash`
 - `jq`
-- `sudo`
 - `ryzenadj`
-
-## Changelog
-
-Release notes are tracked in `CHANGELOG.md` so future GitHub releases can reuse the same version history.
 
 ## Default Config
 
