@@ -1007,8 +1007,8 @@ monitor_and_adjust() {
             continue
         fi
 
-        # Down-ramp hold: only lower TDP after 10s without a demand spike
-        if (( candidate_tdp < current_tdp && (now - last_high_seen) < 10 )); then
+        # Down-ramp hold: only lower TDP after 30s without a demand spike
+        if (( candidate_tdp < current_tdp && (now - last_high_seen) < 30 )); then
             continue
         fi
 
