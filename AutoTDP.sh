@@ -275,7 +275,7 @@ set_tdp() {
 
 # Reads per-core cumulative CPU times as a single snapshot string
 read_core_snapshot() {
-    awk '/^cpu[0-9]+/ {printf "%s %s ", $2+$3+$4+$5+$6+$7+$8+$9, $5+$6} END {print ""}' /proc/stat
+    awk '/^cpu[0-9]+/ {printf "%s %s ", $2+$3+$4+$5+$6+$7+$8+$9, $5} END {print ""}' /proc/stat
 }
 
 # Computes the busiest single core's busy percentage against the previous snapshot.
@@ -935,7 +935,7 @@ monitor_and_adjust() {
     local limited_tdp
     local candidate_tdp=$ACTIVE_DEFAULT_TDP
     local stable_samples=0
-    local last_high_seen=0
+    last_high_seen=$(date +%s)
     local now
 
     read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
