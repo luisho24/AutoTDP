@@ -940,9 +940,9 @@ monitor_and_adjust() {
     local limited_tdp
     local candidate_tdp=$ACTIVE_DEFAULT_TDP
     local stable_samples=0
-    local decay_pct=100
     local last_update_check=0
     local decay_pct=100
+    local decay_remember=100
     local calm_cycles=0
     local apu_draw=0
     local burst_cap
@@ -1015,21 +1015,31 @@ monitor_and_adjust() {
             fi
         fi
 
+        # --- Comfort decay: probe the ceiling down while the game is comfortable ---
         apu_draw=$(get_apu_power_w || echo 0)
 
-        if (( cpu_signal >= 85 )); then
-            # Real demand: full curve, decay resets instantly
+        if (( cpu_signal >= 85 || gpu_usage >= 85 )); then
+            # Hard demand (loading, heavy scene): full curve, instantly
+            decay_remember=$decay_pct
             decay_pct=100
             calm_cycles=0
-        elif (( apu_draw > 0 && apu_draw * 10000 < limited_tdp * 7 )); then
-            # Draw under 70% of the proposed ceiling: comfortable, decay it
+        elif (( cpu_signal < 55 && gpu_usage < 50 )); then
+            # Comfortable: the ceiling is being wasted, probe downward
             calm_cycles=$((calm_cycles + 1))
-            if (( calm_cycles >= 10 && decay_pct > 70 )); then
+            if (( decay_pct > decay_remember )); then
+                # Re-descending to the last known good level: fast
+                if (( calm_cycles >= 2 )); then
+                    decay_pct=$((decay_pct - 5))
+                    calm_cycles=0
+                fi
+            elif (( calm_cycles >= 10 && decay_pct > 60 )); then
+                # Probing below the last known level: careful
                 decay_pct=$((decay_pct - 5))
                 calm_cycles=0
-                log "Power decay: draw ${apu_draw}W floats below limit, decay_pct now ${decay_pct}%"
+                log "Comfort decay: usage ${cpu_signal}/${gpu_usage}, draw ${apu_draw}W, decay now ${decay_pct}%"
             fi
         else
+            # Deadband: hold
             calm_cycles=0
         fi
 
