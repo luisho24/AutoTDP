@@ -322,37 +322,81 @@ get_max_cpu_usage() {
     echo "$top4 $breadth $peak $current"
 }
 
-# Median of its arguments - filters momentary spikes out of sub-samples
-median_of() {
-    printf '%s\n' "$@" | sort -n | awk '{a[NR]=$1} END {if (NR % 2) print a[(NR + 1) / 2]; else print int((a[NR / 2] + a[NR / 2 + 1]) / 2)}'
+
+# Trimmed mean of args (drops high and low); sets TM_RESULT. No forks.
+trimmed_mean() {
+    local sum=0 lo=999999 hi=0 v
+    for v in "$@"; do
+        (( v < lo )) && lo=$v
+        (( v > hi )) && hi=$v
+        (( sum += v ))
+    done
+    if (( $# > 2 )); then
+        TM_RESULT=$(( (sum - lo - hi) / ($# - 2) ))
+    else
+        TM_RESULT=$(( $# > 0 ? sum / $# : 0 ))
+    fi
 }
 
-# Function to read the highest GPU utilization across all DRM cards
+# Pure-bash /proc/stat reader; sets SNAPSHOT. No forks.
+read_core_snapshot() {
+    local line
+    SNAPSHOT=""
+    while read -r line; do
+        case "$line" in
+            cpu[0-9]*)
+                set -- $line
+                SNAPSHOT+="$(( $2+$3+$4+$5+$6+$7+$8+$9 )) $(( $5+$6 )) "
+                ;;
+        esac
+    done < /proc/stat
+}
+
+get_max_cpu_usage() {
+    local previous=$1 current
+    local peak=0 t1=0 t2=0 t3=0 t4=0
+    local i n td id busy pct
+    local -a pts cts
+
+    read_core_snapshot
+    current=$SNAPSHOT
+
+    read -r -a pts <<< "$previous"
+    read -r -a cts <<< "$current"
+
+    n=$(( ${#cts[@]} / 2 ))
+
+    if (( ${#pts[@]} == ${#cts[@]} && n > 0 )); then
+        for ((i=0; i<n; i++)); do
+            td=$(( ${cts[i*2]} - ${pts[i*2]} ))
+            id=$(( ${cts[i*2+1]} - ${pts[i*2+1]} ))
+            (( td <= 0 )) && continue
+            busy=$((td - id))
+            (( busy < 0 )) && busy=0
+            pct=$(( busy * 100 / td ))
+            (( pct > peak )) && peak=$pct
+            if (( pct >= t1 )); then t4=$t3; t3=$t2; t2=$t1; t1=$pct
+            elif (( pct >= t2 )); then t4=$t3; t3=$t2; t2=$pct
+            elif (( pct >= t3 )); then t4=$t3; t3=$pct
+            elif (( pct >= t4 )); then t4=$pct
+            fi
+        done
+    fi
+
+    CUR_TOP4=$(( (t1 + t2 + t3 + t4) / 4 ))
+    CUR_PEAK=$peak
+    CUR_SNAPSHOT=$current
+}
+
+# Max GPU busy% across cards; sets MAX_GPU. No forks.
 get_max_gpu_usage() {
-    local max_gpu=0
-    local gpu_pct
+    local f gpu_pct
+    MAX_GPU=0
     for f in /sys/class/drm/card*/device/gpu_busy_percent; do
         [[ -r "$f" ]] || continue
-        gpu_pct=$(cat "$f" 2>/dev/null) || continue
-        if (( gpu_pct > max_gpu )); then
-            max_gpu=$gpu_pct
-        fi
-    done
-    echo "$max_gpu"
-}
-
-# Returns current APU power draw in watts, 0 if unreadable
-get_apu_power_w() {
-    local f p
-    for f in /sys/class/hwmon/hwmon*/power1_average; do
-        [[ -r "$f" ]] || continue
-        grep -qi amdgpu "${f%power1_average}name" 2>/dev/null || continue
-        p=$(cat "$f" 2>/dev/null) || continue
-        echo $(( p / 1000000 ))   # µW -> W
-        return 0
-    done
-    return 1
-}
+        read -r gpu_pct < "$f" 2>/dev/null || continue
+        (( gpu_pct > MAX_GPU )) && MAX_GPU=$gpu_pct
+    d
 
 is_on_external_power() {
     local supply
@@ -925,7 +969,6 @@ determine_tdp() {
     echo $(( (tdp / STEP_TDP) * STEP_TDP ))
 }
 
-
 # Function to monitor and adjust TDP based on CPU/GPU usage
 monitor_and_adjust() {
     local last_adjustment=0
@@ -937,24 +980,27 @@ monitor_and_adjust() {
     local new_power_state
     local ceiling
 
-    # Zone thresholds on combined load (percent). The whole tuning surface.
-    local LOAD_MAX=75     # at/above: jump straight to the ceiling
-    local LOAD_UP=50      # above: climb 2W; between DOWN and UP: hold
-    local LOAD_DOWN=45    # at/below: descend (2W if very idle)
+    # Proportional mapping: load% maps linearly onto MIN..ceiling.
+    # 90% load = full ceiling, 45% = halfway, below scales toward MIN.
+    local FULL_SCALE=90
 
-    local cpu_signal=0 gpu_usage=0 load=0 sig=0 max_sig=0
-    local sub_cpu sub_breadth sub_peak
+    # CPU spikes: momentary busy-core bursts earn a temporary +3W
+    local SPIKE_THRESHOLD=70   # sub-sample max that counts as a spike
+    local SPIKE_BONUS=3000     # +3W
+    local SPIKE_HOLD=15        # seconds without spikes before bonus expires
+    local last_spike=0
+
+    local cpu_signal=0 gpu_usage=0 load=0 smooth_load=-1 sig=0 max_sig=0
+    local base_target target_tdp diff
     local -a sig_samples=()
     local -a gpu_samples=()
-    local target_tdp
 
-    local low_streak=0
-
-    read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
+    get_max_cpu_usage ""
+    prev_snapshot=$CUR_SNAPSHOT
 
     set_tdp "$ACTIVE_DEFAULT_TDP"
     current_tdp=$ACTIVE_DEFAULT_TDP
-    last_adjustment=$(date +%s)
+    last_adjustment=$EPOCHSECONDS
 
     log "Monitoring and adjusting TDP started"
 
@@ -978,7 +1024,7 @@ monitor_and_adjust() {
             if (( new_power_state == 0 && current_tdp > ceiling )); then
                 set_tdp "$ceiling"
                 current_tdp=$ceiling
-                last_adjustment=$(date +%s)
+                last_adjustment=$EPOCHSECONDS
             fi
         fi
 
@@ -988,8 +1034,8 @@ monitor_and_adjust() {
         fi
 
         # Periodic update check
-        if (( $(date +%s) - last_update_check >= UPDATE_CHECK_INTERVAL )); then
-            last_update_check=$(date +%s)
+        if (( EPOCHSECONDS - last_update_check >= UPDATE_CHECK_INTERVAL )); then
+            last_update_check=$EPOCHSECONDS
             if download_file "$UPDATE_URL" /tmp/autotdp_check.sh 2>/dev/null \
                 && ! cmp -s /tmp/autotdp_check.sh "$SCRIPT_DEST"; then
                 log "Update available upstream - run: $0 --update"
@@ -997,74 +1043,81 @@ monitor_and_adjust() {
             rm -f /tmp/autotdp_check.sh
         fi
 
-        # Sub-sample the interval; aggregate with the MEDIAN so a single
-        # momentary core spike (menu animation) doesn't read as sustained load
+        # Sub-sample the interval; trimmed mean filters momentary spikes
         sig_samples=()
         gpu_samples=()
         max_sig=0
         for (( sub=0; sub < ACTIVE_MONITOR_INTERVAL * 2; sub++ )); do
             sleep 0.5
-            read -r sub_cpu sub_breadth sub_peak prev_snapshot < <(get_max_cpu_usage "$prev_snapshot")
-            sig=$(( (sub_cpu + sub_peak) / 2 ))
+            get_max_cpu_usage "$prev_snapshot"
+            prev_snapshot=$CUR_SNAPSHOT
+            sig=$(( (CUR_TOP4 + CUR_PEAK) / 2 ))
             sig_samples+=( "$sig" )
             (( sig > max_sig )) && max_sig=$sig
-            gpu_samples+=( "$(get_max_gpu_usage)" )
+            get_max_gpu_usage
+            gpu_samples+=( "$MAX_GPU" )
         done
 
-        cpu_signal=$(median_of "${sig_samples[@]}")
-        gpu_usage=$(median_of "${gpu_samples[@]}")
+        trimmed_mean "${sig_samples[@]}"; cpu_signal=$TM_RESULT
+        trimmed_mean "${gpu_samples[@]}"; gpu_usage=$TM_RESULT
+
+        # The bottleneck sets the load: whichever of CPU or GPU is higher
         if (( gpu_usage > cpu_signal )); then
             load=$gpu_usage
         else
             load=$cpu_signal
         fi
 
+        # Smooth between cycles so single-cycle dips don't jerk the target
+        if (( smooth_load < 0 )); then
+            smooth_load=$load
+        else
+            smooth_load=$(( (smooth_load + load) / 2 ))
+        fi
+
+        # Spike activity refreshes the bonus window
+        if (( max_sig >= SPIKE_THRESHOLD )); then
+            last_spike=$EPOCHSECONDS
+        fi
+
         log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | load: ${load}% | TDP: $((current_tdp / 1000))W"
 
         # Re-assert limits occasionally in case the EC resets them
-        if (( $(date +%s) - last_adjustment > 300 )); then
+        if (( EPOCHSECONDS - last_adjustment > 300 )); then
             set_tdp "$current_tdp"
-            last_adjustment=$(date +%s)
+            last_adjustment=$EPOCHSECONDS
         fi
 
-        # --- The whole controller: five zones on one number ---
-        if (( load >= LOAD_MAX )); then
-            target_tdp=$ceiling
-            low_streak=0
-        elif (( load >= LOAD_UP )); then
-            target_tdp=$(( current_tdp + 2 * STEP_TDP ))
-            low_streak=0
-        elif (( load >= LOAD_DOWN )); then
-            target_tdp=$current_tdp
-            low_streak=0
-        elif (( load >= 25 )); then
-            # Mildly low: descend only after 4 sustained cycles (~16s)
-            low_streak=$((low_streak + 1))
-            if (( low_streak >= 4 )); then
-                target_tdp=$(( current_tdp - STEP_TDP ))
-                low_streak=0
-            else
-                target_tdp=$current_tdp
-            fi
+        # --- Proportional target: 90% load = ceiling, 45% = halfway, linear ---
+        if (( smooth_load >= FULL_SCALE )); then
+            base_target=$ceiling
         else
-            # Deep idle: drop fast, but confirm with 2 cycles
-            low_streak=$((low_streak + 1))
-            if (( low_streak >= 2 )); then
-                target_tdp=$(( current_tdp - 2 * STEP_TDP ))
-                low_streak=0
-            else
-                target_tdp=$current_tdp
-            fi
+            base_target=$(( MIN_TDP + (ceiling - MIN_TDP) * smooth_load / FULL_SCALE ))
+        fi
+
+        # --- Spike bonus: +3W while spiking, expires after 15s of quiet ---
+        if (( EPOCHSECONDS - last_spike < SPIKE_HOLD )); then
+            target_tdp=$(( base_target + SPIKE_BONUS ))
+        else
+            target_tdp=$base_target
         fi
 
         (( target_tdp > ceiling )) && target_tdp=$ceiling
         (( target_tdp < MIN_TDP )) && target_tdp=$MIN_TDP
 
-        if (( target_tdp != current_tdp && $(($(date +%s) - last_adjustment)) >= ACTIVE_RYZENADJ_DELAY )); then
-            log "Adjusting TDP from $current_tdp to $target_tdp (load ${load}%)"
+        # Up: jump straight to target. Down: at most 2W per write.
+        if (( target_tdp < current_tdp )); then
+            (( current_tdp - target_tdp > 2 * STEP_TDP )) && target_tdp=$(( current_tdp - 2 * STEP_TDP ))
+        fi
+
+        # Deadband: ignore sub-0.5W churn
+        diff=$(( target_tdp - current_tdp ))
+        (( diff < 0 )) && diff=$(( -diff ))
+        if (( diff > 500 && EPOCHSECONDS - last_adjustment >= ACTIVE_RYZENADJ_DELAY )); then
+            log "Adjusting TDP from $current_tdp to $target_tdp (load ${load}%, smooth ${smooth_load}%)"
             set_tdp "$target_tdp"
             current_tdp=$target_tdp
-            last_adjustment=$(date +%s)
+            last_adjustment=$EPOCHSECONDS
         fi
     done
 }
