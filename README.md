@@ -2,7 +2,7 @@
 
 AutoTDP is a Bash script that adjusts AMD APU TDP dynamically with `ryzenadj` based on % of your SOC used. It is designed for Linux handheld PCs and AMD laptops, and uses real CPU and GPU utilization.
 
-**See releases page for installation instructions**
+**See releases page for installation instructions!**
 
 ## Features
 
