@@ -336,6 +336,19 @@ get_max_gpu_usage() {
     echo "$max_gpu"
 }
 
+# Returns current APU power draw in watts, 0 if unreadable
+get_apu_power_w() {
+    local f p
+    for f in /sys/class/hwmon/hwmon*/power1_average; do
+        [[ -r "$f" ]] || continue
+        grep -qi amdgpu "${f%power1_average}name" 2>/dev/null || continue
+        p=$(cat "$f" 2>/dev/null) || continue
+        echo $(( p / 1000000 ))   # µW -> W
+        return 0
+    done
+    return 1
+}
+
 is_on_external_power() {
     local supply
     local supply_type
@@ -927,7 +940,12 @@ monitor_and_adjust() {
     local limited_tdp
     local candidate_tdp=$ACTIVE_DEFAULT_TDP
     local stable_samples=0
+    local decay_pct=100
     local last_update_check=0
+    local decay_pct=100
+    local calm_cycles=0
+    local apu_draw=0
+    local burst_cap
 
     read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
 
@@ -995,6 +1013,29 @@ monitor_and_adjust() {
             if (( limited_tdp > burst_cap )); then
                 limited_tdp=$burst_cap
             fi
+        fi
+
+        apu_draw=$(get_apu_power_w || echo 0)
+
+        if (( cpu_signal >= 85 )); then
+            # Real demand: full curve, decay resets instantly
+            decay_pct=100
+            calm_cycles=0
+        elif (( apu_draw > 0 && apu_draw * 10000 < limited_tdp * 7 )); then
+            # Draw under 70% of the proposed ceiling: comfortable, decay it
+            calm_cycles=$((calm_cycles + 1))
+            if (( calm_cycles >= 10 && decay_pct > 70 )); then
+                decay_pct=$((decay_pct - 5))
+                calm_cycles=0
+                log "Power decay: draw ${apu_draw}W floats below limit, decay_pct now ${decay_pct}%"
+            fi
+        else
+            calm_cycles=0
+        fi
+
+        limited_tdp=$(( limited_tdp * decay_pct / 100 ))
+        if (( limited_tdp < MIN_TDP )); then
+            limited_tdp=$MIN_TDP
         fi
 
         if [[ $limited_tdp == "$current_tdp" ]]; then
