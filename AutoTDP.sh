@@ -948,6 +948,8 @@ monitor_and_adjust() {
     local apu_draw=0
     local burst_cap
     local demand_streak=0
+    local cpu_comfort_gate=60
+    local cpu_near_gate=80
 
     read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
 
@@ -988,7 +990,7 @@ monitor_and_adjust() {
 
         cpu_usage=$cpu_peak
 
-        log "Current CPU usage: ${cpu_usage}% | GPU usage: ${gpu_usage}%"
+        log "Current CPU usage: ${cpu_usage}% | GPU usage: ${gpu_usage}% | cores>=40%: ${core_breadth}"
 
         cpu_signal=$cpu_peak
 
@@ -1021,6 +1023,14 @@ monitor_and_adjust() {
         apu_draw=$(get_apu_power_w || echo 0)
         curve_tdp=$limited_tdp   # the curve + burst-cap answer, saved
 
+        # --- Multicore-aware gates: busiest-core % underreads many-thread loads,
+        # so tighten the CPU thresholds as more cores go busy. GPU gates stay fixed.
+        cpu_comfort_gate=$(( 60 - (core_breadth - 1) * 5 ))
+        (( cpu_comfort_gate < 40 )) && cpu_comfort_gate=40
+        cpu_near_gate=$(( 80 - (core_breadth - 3) * 5 ))
+        (( cpu_near_gate > 80 )) && cpu_near_gate=80
+        (( cpu_near_gate < 65 )) && cpu_near_gate=65
+
         if (( cpu_signal >= 85 || gpu_usage >= 85 )); then
             demand_streak=$((demand_streak + 1))
             calm_cycles=0
@@ -1037,7 +1047,7 @@ monitor_and_adjust() {
                     limited_tdp=$curve_tdp
                 fi
             fi
-        elif (( cpu_signal >= 80 || gpu_usage >= 80 )); then
+        elif (( cpu_signal >= cpu_near_gate || gpu_usage >= 80 )); then
             # Near-demand: climb one step toward the curve's answer
             limited_tdp=$(( current_tdp + STEP_TDP ))
             if (( limited_tdp > curve_tdp )); then
@@ -1045,7 +1055,7 @@ monitor_and_adjust() {
             fi
             was_demand=0
             demand_streak=0
-        elif (( cpu_signal < 60 && gpu_usage < 75 )); then
+        elif (( cpu_signal < cpu_comfort_gate && gpu_usage < 75 )); then
             # Comfortable: probe downward from where we are
             calm_cycles=$((calm_cycles + 1))
             if (( knee_remember > 0 && current_tdp > knee_remember )); then
@@ -1082,7 +1092,11 @@ monitor_and_adjust() {
             limited_tdp=$curve_tdp
         fi
 
-        
+        if is_on_external_power; then
+            (( limited_tdp > ACTIVE_MAX_TDP )) && limited_tdp=$ACTIVE_MAX_TDP
+        else
+            (( limited_tdp > ACTIVE_BATTERY_MAX_TDP )) && limited_tdp=$ACTIVE_BATTERY_MAX_TDP
+        fi
 
         if (( limited_tdp < MIN_TDP )); then
             limited_tdp=$MIN_TDP
