@@ -1019,11 +1019,14 @@ monitor_and_adjust() {
         apu_draw=$(get_apu_power_w || echo 0)
 
         if (( cpu_signal >= 85 || gpu_usage >= 85 )); then
-            # Hard demand (loading, heavy scene): full curve, instantly
-            decay_remember=$decay_pct
+            # Hard demand (loading, heavy scene): full curve, instantly.
+            # Remember where we were, plus a margin so we don't dive
+            # straight back to a level that may have caused the spike.
+            decay_remember=$((decay_pct + 10))
+            (( decay_remember > 100 )) && decay_remember=100
             decay_pct=100
             calm_cycles=0
-        elif (( cpu_signal < 55 && gpu_usage < 50 )); then
+        elif (( cpu_signal < 60 && gpu_usage < 55 )); then
             # Comfortable: the ceiling is being wasted, probe downward
             calm_cycles=$((calm_cycles + 1))
             if (( decay_pct > decay_remember )); then
@@ -1038,9 +1041,6 @@ monitor_and_adjust() {
                 calm_cycles=0
                 log "Comfort decay: usage ${cpu_signal}/${gpu_usage}, draw ${apu_draw}W, decay now ${decay_pct}%"
             fi
-        else
-            # Deadband: hold
-            calm_cycles=0
         fi
 
         limited_tdp=$(( limited_tdp * decay_pct / 100 ))
