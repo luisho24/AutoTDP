@@ -396,7 +396,8 @@ get_max_gpu_usage() {
         [[ -r "$f" ]] || continue
         read -r gpu_pct < "$f" 2>/dev/null || continue
         (( gpu_pct > MAX_GPU )) && MAX_GPU=$gpu_pct
-    d
+    done
+}
 
 is_on_external_power() {
     local supply
