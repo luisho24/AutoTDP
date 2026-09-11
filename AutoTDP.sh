@@ -1034,11 +1034,18 @@ monitor_and_adjust() {
         # On battery, the same game needs the same watts at the same load —
         # so the load->watt curve must hit the (lower) battery ceiling sooner.
         # Scale the full-load point by ceiling ratio: 20W/25W -> 90% becomes 72%.
+        # Compress the battery curve ONLY under real GPU demand: the same
+        # game needs the same watts as AC, but only when it's actually
+        # pushing the GPU. Light/medium loads keep the normal curve.
         if (( new_power_state == 1 || ACTIVE_MAX_TDP <= 0 )); then
             eff_full=$FULL_SCALE
-        else
+        elif (( gpu_usage >= 60 )); then
+            # Clearly demanding: compress the curve
             eff_full=$(( FULL_SCALE * ceiling / ACTIVE_MAX_TDP ))
-            (( eff_full < 50 )) && eff_full=50   # sanity floor
+            (( eff_full < 50 )) && eff_full=50
+        elif (( gpu_usage < 55 )); then
+            # Clearly light: normal curve
+            eff_full=$FULL_SCALE
         fi
 
         cycle=$((cycle + 1))
