@@ -1035,7 +1035,7 @@ monitor_and_adjust() {
                 limited_tdp=$curve_tdp
             fi
             was_demand=0
-        elif (( cpu_signal < 60 && gpu_usage < 55 )); then
+        elif (( cpu_signal < 60 && gpu_usage < 75 )); then
             # Comfortable: probe downward from where we are
             calm_cycles=$((calm_cycles + 1))
             if (( knee_remember > 0 && current_tdp > knee_remember )); then
