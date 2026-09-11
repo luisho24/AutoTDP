@@ -1078,7 +1078,7 @@ monitor_and_adjust() {
         fi
 
         # Spike activity refreshes the bonus window
-        if (( max_sig >= SPIKE_THRESHOLD || io_pct >= IO_BURST_PCT )); then
+        if (( max_sig >= SPIKE_THRESHOLD)); then
             last_spike=$EPOCHSECONDS
         fi
 
