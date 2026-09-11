@@ -1113,9 +1113,10 @@ monitor_and_adjust() {
         fi
 
         (( target_tdp > ceiling )) && target_tdp=$ceiling
+        (( target_tdp < MIN_TDP )) && target_tdp=$MIN_TDP
 
-        # Round down to the nearest watt (17 455 -> 17 000)
-        target_tdp=$(( target_tdp / STEP_TDP * STEP_TDP ))
+        # Round to nearest watt: sub-0.5W down, 0.5W+ up
+        target_tdp=$(( (target_tdp + STEP_TDP * 3 / 4) / STEP_TDP * STEP_TDP ))
         (( target_tdp < MIN_TDP )) && target_tdp=$MIN_TDP
 
         # Up: jump straight to target. Down: at most 2W per write.
