@@ -295,15 +295,17 @@ check_packages() {
 
 # Detect whether to use ASUS WMI or ryzenadj for TDP control
 detect_tdp_interface() {
-    # Prefer ASUS Armoury WMI (newer interface) — but only if writable
-    local fast_path="$ASUS_ARMORY_FAST_WMI_PATH"
+    local fast_path readback
+
+    # Prefer ASUS Armoury WMI (newer interface)
+    fast_path="$ASUS_ARMORY_FAST_WMI_PATH"
     [[ -f "$UPDATED_ASUS_ARMORY_FAST_WMI_PATH" ]] && fast_path="$UPDATED_ASUS_ARMORY_FAST_WMI_PATH"
 
     if [[ -f "$fast_path" ]] && [[ -f "$ASUS_ARMORY_SLOW_WMI_PATH" ]] && [[ -f "$ASUS_ARMORY_STAPM_WMI_PATH" ]]; then
-        # Test if Armoury WMI is actually writable
-        local test_val
-        test_val=$(cat "$ASUS_ARMORY_STAPM_WMI_PATH" 2>/dev/null)
-        if [[ -n "$test_val" ]] && printf '%s\n' "$test_val" > "$ASUS_ARMORY_STAPM_WMI_PATH" 2>/dev/null; then
+        # Test writability: write 20W and verify it actually took effect
+        printf '20\n' > "$ASUS_ARMORY_STAPM_WMI_PATH" 2>/dev/null
+        readback=$(cat "$ASUS_ARMORY_STAPM_WMI_PATH" 2>/dev/null)
+        if [[ "$readback" == "20" ]]; then
             USE_WMI_TDP=1
             WMI_FAST_PATH="$fast_path"
             WMI_SLOW_PATH="$ASUS_ARMORY_SLOW_WMI_PATH"
@@ -315,15 +317,15 @@ detect_tdp_interface() {
             log "Using ASUS Armoury WMI for TDP control"
             return 0
         else
-            log "ASUS Armoury WMI detected but not writable, trying legacy WMI"
+            log "ASUS Armoury WMI detected but not writable (wrote 20, read '$readback'), trying legacy WMI"
         fi
     fi
 
-    # Legacy WMI — also test writability
+    # Legacy WMI — also test with a known value
     if [[ -f "$FAST_WMI_PATH" ]] && [[ -f "$SLOW_WMI_PATH" ]] && [[ -f "$STAPM_WMI_PATH" ]]; then
-        local test_val
-        test_val=$(cat "$STAPM_WMI_PATH" 2>/dev/null)
-        if [[ -n "$test_val" ]] && printf '%s\n' "$test_val" > "$STAPM_WMI_PATH" 2>/dev/null; then
+        printf '20\n' > "$STAPM_WMI_PATH" 2>/dev/null
+        readback=$(cat "$STAPM_WMI_PATH" 2>/dev/null)
+        if [[ "$readback" == "20" ]]; then
             USE_WMI_TDP=1
             WMI_FAST_PATH="$FAST_WMI_PATH"
             WMI_SLOW_PATH="$SLOW_WMI_PATH"
@@ -342,50 +344,65 @@ detect_tdp_interface() {
 set_tdp_wmi() {
     local value_mw=$1
     local value_w=$((value_mw / 1000))
+
+    # WMI enforces minimums: fast/slow ≥ 15W, stapm ≥ 7W on Ally X.
+    # For TDP < 15W, ryzenadj can set all three limits consistently,
+    # while WMI would leave fast/slow at 15W (different effective behavior).
+    if (( value_w < 15 )); then
+        TDP_LOG="ryzenadj ${value_mw}mW (WMI minimum 15W)"
+        set_tdp_ryzenadj "$value_mw"
+        return $?
+    fi
+
     local fast_tdp=$value_w
     local slow_tdp=$value_w
     local stapm_tdp=$value_w
     local note=""
 
-    # Newer Armoury firmware enforces per-limit min/max
+    # Apply firmware maximums if low-power mode is detected
     if (( WMI_HAS_LOW_POWER == 1 )); then
-        (( fast_tdp < 15 )) && { fast_tdp=15; note="clamped"; }
-        (( slow_tdp < 15 )) && { slow_tdp=15; note="clamped"; }
-        (( stapm_tdp < 7 )) && { stapm_tdp=7; note="clamped"; }
         (( fast_tdp > 53 )) && { fast_tdp=53; note="clamped"; }
         (( slow_tdp > 43 )) && { slow_tdp=43; note="clamped"; }
         (( stapm_tdp > 30 )) && { stapm_tdp=30; note="clamped"; }
     fi
 
-    local fast_err="" slow_err="" stapm_err=""
+    local readback
 
-    if ! printf '%s\n' "$fast_tdp" > "$WMI_FAST_PATH" 2>&1; then
-        fast_err=$(cat "$WMI_FAST_PATH" 2>/dev/null)
-        log "WMI fast write failed: path=$WMI_FAST_PATH value=$fast_tdp error='$fast_err'"
+    # Write fast limit and verify
+    printf '%s\n' "$fast_tdp" > "$WMI_FAST_PATH" 2>/dev/null
+    sleep 0.1
+    readback=$(cat "$WMI_FAST_PATH" 2>/dev/null)
+    if [[ "$readback" != "$fast_tdp" ]]; then
+        log "WMI fast rejected: wrote $fast_tdp, read '$readback'"
         log "WMI write failed, falling back to ryzenadj"
         set_tdp_ryzenadj "$value_mw"
         return $?
     fi
-    sleep 0.1
 
-    if ! printf '%s\n' "$slow_tdp" > "$WMI_SLOW_PATH" 2>&1; then
-        slow_err=$(cat "$WMI_SLOW_PATH" 2>/dev/null)
-        log "WMI slow write failed: path=$WMI_SLOW_PATH value=$slow_tdp error='$slow_err'"
+    # Write slow limit and verify
+    printf '%s\n' "$slow_tdp" > "$WMI_SLOW_PATH" 2>/dev/null
+    sleep 0.1
+    readback=$(cat "$WMI_SLOW_PATH" 2>/dev/null)
+    if [[ "$readback" != "$slow_tdp" ]]; then
+        log "WMI slow rejected: wrote $slow_tdp, read '$readback'"
         log "WMI write failed, falling back to ryzenadj"
         set_tdp_ryzenadj "$value_mw"
         return $?
     fi
-    sleep 0.1
 
-    if ! printf '%s\n' "$stapm_tdp" > "$WMI_STAPM_PATH" 2>&1; then
-        stapm_err=$(cat "$WMI_STAPM_PATH" 2>/dev/null)
-        log "WMI stapm write failed: path=$WMI_STAPM_PATH value=$stapm_tdp error='$stapm_err'"
+    # Write stapm limit and verify
+    printf '%s\n' "$stapm_tdp" > "$WMI_STAPM_PATH" 2>/dev/null
+    sleep 0.1
+    readback=$(cat "$WMI_STAPM_PATH" 2>/dev/null)
+    if [[ "$readback" != "$stapm_tdp" ]]; then
+        log "WMI stapm rejected: wrote $stapm_tdp, read '$readback'"
         log "WMI write failed, falling back to ryzenadj"
         set_tdp_ryzenadj "$value_mw"
         return $?
     fi
 
     TDP_LOG="WMI ${value_w}W f=${fast_tdp} s=${slow_tdp} st=${stapm_tdp}${note:+ [${note}]}"
+    return 0
 }
 
 # Set TDP via ryzenadj (original method)
