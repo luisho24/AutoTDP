@@ -322,6 +322,11 @@ get_max_cpu_usage() {
     echo "$top4 $breadth $peak $current"
 }
 
+# Median of its arguments - filters momentary spikes out of sub-samples
+median_of() {
+    printf '%s\n' "$@" | sort -n | awk '{a[NR]=$1} END {if (NR % 2) print a[(NR + 1) / 2]; else print int((a[NR / 2] + a[NR / 2 + 1]) / 2)}'
+}
+
 # Function to read the highest GPU utilization across all DRM cards
 get_max_gpu_usage() {
     local max_gpu=0
@@ -937,8 +942,10 @@ monitor_and_adjust() {
     local LOAD_UP=60      # above: climb 2W; between DOWN and UP: hold
     local LOAD_DOWN=45    # at/below: descend (2W if very idle)
 
-    local top4=0 cpu_peak=0 cpu_signal=0 gpu_usage=0 load=0
-    local sub_cpu sub_breadth sub_peak sub_gpu
+    local cpu_signal=0 gpu_usage=0 load=0 sig=0 max_sig=0
+    local sub_cpu sub_breadth sub_peak
+    local -a sig_samples=()
+    local -a gpu_samples=()
     local target_tdp
 
     read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
@@ -988,28 +995,29 @@ monitor_and_adjust() {
             rm -f /tmp/autotdp_check.sh
         fi
 
-        # Sub-sample the interval; keep the peak of each metric
-        top4=0
-        cpu_peak=0
-        gpu_usage=0
+        # Sub-sample the interval; aggregate with the MEDIAN so a single
+        # momentary core spike (menu animation) doesn't read as sustained load
+        sig_samples=()
+        gpu_samples=()
+        max_sig=0
         for (( sub=0; sub < ACTIVE_MONITOR_INTERVAL * 2; sub++ )); do
             sleep 0.5
             read -r sub_cpu sub_breadth sub_peak prev_snapshot < <(get_max_cpu_usage "$prev_snapshot")
-            (( sub_cpu > top4 )) && top4=$sub_cpu
-            (( sub_peak > cpu_peak )) && cpu_peak=$sub_peak
-            sub_gpu=$(get_max_gpu_usage)
-            (( sub_gpu > gpu_usage )) && gpu_usage=$sub_gpu
+            sig=$(( (sub_cpu + sub_peak) / 2 ))
+            sig_samples+=( "$sig" )
+            (( sig > max_sig )) && max_sig=$sig
+            gpu_samples+=( "$(get_max_gpu_usage)" )
         done
 
-        # CPU signal: average (4 busiest cores) blended with single-core peak
-        cpu_signal=$(( (top4 + cpu_peak) / 2 ))
+        cpu_signal=$(median_of "${sig_samples[@]}")
+        gpu_usage=$(median_of "${gpu_samples[@]}")
         if (( gpu_usage > cpu_signal )); then
             load=$gpu_usage
         else
             load=$cpu_signal
         fi
 
-        log "CPU: ${cpu_signal}% (avg ${top4}/peak ${cpu_peak}) | GPU: ${gpu_usage}% | load: ${load}% | TDP: $((current_tdp / 1000))W"
+        log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | load: ${load}% | TDP: $((current_tdp / 1000))W"
 
         # Re-assert limits occasionally in case the EC resets them
         if (( $(date +%s) - last_adjustment > 300 )); then
