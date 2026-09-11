@@ -947,6 +947,7 @@ monitor_and_adjust() {
     local calm_cycles=0
     local apu_draw=0
     local burst_cap
+    local demand_streak=0
 
     read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
 
@@ -1021,13 +1022,21 @@ monitor_and_adjust() {
         curve_tdp=$limited_tdp   # the curve + burst-cap answer, saved
 
         if (( cpu_signal >= 85 || gpu_usage >= 85 )); then
-            # Hard demand (loading, heavy scene): take the curve's answer.
-            # Edge-triggered: remember the pre-spike level once per episode.
-            if (( was_demand == 0 )); then
-                knee_remember=$(( current_tdp + STEP_TDP ))
-                was_demand=1
-            fi
+            demand_streak=$((demand_streak + 1))
             calm_cycles=0
+            if (( demand_streak >= 2 )); then
+                # Sustained demand: curve's answer (limited_tdp already holds it)
+                if (( was_demand == 0 )); then
+                    knee_remember=$(( current_tdp + STEP_TDP ))
+                    was_demand=1
+                fi
+            else
+                # First cycle: probe with one step, like near-demand
+                limited_tdp=$(( current_tdp + STEP_TDP ))
+                if (( limited_tdp > curve_tdp )); then
+                    limited_tdp=$curve_tdp
+                fi
+            fi
         elif (( cpu_signal >= 80 || gpu_usage >= 80 )); then
             # Near-demand: climb one step toward the curve's answer
             limited_tdp=$(( current_tdp + STEP_TDP ))
@@ -1035,6 +1044,7 @@ monitor_and_adjust() {
                 limited_tdp=$curve_tdp
             fi
             was_demand=0
+            demand_streak=0
         elif (( cpu_signal < 60 && gpu_usage < 75 )); then
             # Comfortable: probe downward from where we are
             calm_cycles=$((calm_cycles + 1))
@@ -1058,11 +1068,13 @@ monitor_and_adjust() {
                 limited_tdp=$current_tdp
             fi
             was_demand=0
+            demand_streak=0
         else
             # Deadband (60-80): this is the knee. HOLD the current level;
             # the curve does not get to reinterpret moderate usage as demand.
             limited_tdp=$current_tdp
             was_demand=0
+            demand_streak=0
         fi
 
         # Deep idle (game closed): let the curve pull down at ramp speed
