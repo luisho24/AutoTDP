@@ -284,52 +284,6 @@ read_core_snapshot() {
     awk '/^cpu[0-9]+/ {printf "%s %s ", $2+$3+$4+$5+$6+$7+$8+$9, $5} END {print ""}' /proc/stat
 }
 
-read_io_snapshot() {
-    local line name io_ticks
-    IO_SNAPSHOT=""
-    while read -r line; do
-        set -- $line
-        name=$3
-        io_ticks=${13}
-        case "$name" in
-            loop*|ram*|zram*|fd*|sr*|md*) ;;
-            nvme*|mmcblk*|sd*|dm-*|vd*|hd*)
-                IO_SNAPSHOT+="$name $io_ticks "
-                ;;
-        esac
-    done < /proc/diskstats
-}
-
-
-# Sets IO_BUSY to the max busy-ms delta vs previous snapshot.
-get_io_busy() {
-    local previous=$1 current
-    local -a pts cts
-    local i n name pkey pval busy max_busy=0
-
-    read_io_snapshot
-    current=$IO_SNAPSHOT
-
-    read -r -a pts <<< "$previous"
-    read -r -a cts <<< "$current"
-
-    n=$(( ${#cts[@]} / 2 ))
-    if (( n > 0 )); then
-        for ((i=0; i<n; i++)); do
-            name=${cts[i*2]}
-            pkey=-1
-            for ((i2=0; i2 < ${#pts[@]}/2; i2++)); do
-                [[ ${pts[i2*2]} == "$name" ]] && pkey=${pts[i2*2+1]} && break
-            done
-            (( pkey < 0 )) && continue
-            (( cts[i*2+1] < pkey )) && continue
-            busy=$(( cts[i*2+1] - pkey ))
-            (( busy > max_busy )) && max_busy=$busy
-        done
-    fi
-    IO_BUSY=$max_busy
-    IO_SNAPSHOT_PREV=$current
-}
 
 # Computes the busiest single core's busy percentage against the previous snapshot.
 get_max_cpu_usage() {
@@ -1043,15 +997,8 @@ monitor_and_adjust() {
     local -a sig_samples=()
     local -a gpu_samples=()
 
-    local IO_BURST_PCT=60    # device busy >= 60% of wall time = loading burst
-    local io_pct=0
-    local prev_io=""
-
     get_max_cpu_usage ""
     prev_snapshot=$CUR_SNAPSHOT
-
-    read_io_snapshot
-    prev_io=$IO_SNAPSHOT
 
     set_tdp "$ACTIVE_DEFAULT_TDP"
     current_tdp=$ACTIVE_DEFAULT_TDP
@@ -1111,9 +1058,6 @@ monitor_and_adjust() {
             (( sig > max_sig )) && max_sig=$sig
             get_max_gpu_usage
             gpu_samples+=( "$MAX_GPU" )
-            get_io_busy "$prev_io"
-            prev_io=$IO_SNAPSHOT_PREV
-            io_pct=$(( IO_BUSY * 100 / (ACTIVE_MONITOR_INTERVAL * 1000) ))
         done
 
         trimmed_mean "${sig_samples[@]}"; cpu_signal=$TM_RESULT
@@ -1138,7 +1082,7 @@ monitor_and_adjust() {
             last_spike=$EPOCHSECONDS
         fi
 
-        log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | io: ${io_pct}% | load: ${load}% | TDP: $((current_tdp / 1000))W"
+        log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | load: ${load}% | TDP: $((current_tdp / 1000))W"
 
         # Re-assert limits occasionally in case the EC resets them
         if (( EPOCHSECONDS - last_adjustment > 300 )); then
@@ -1157,8 +1101,12 @@ monitor_and_adjust() {
             base_target=$(( MIN_TDP + (ceiling - MIN_TDP) * smooth_load / FULL_SCALE ))
         fi
 
-        # --- Spike bonus: +3W while spiking, expires after 15s of quiet ---
-        if (( EPOCHSECONDS - last_spike < SPIKE_HOLD )); then
+        # --- Spike bonuses ---
+        # Pegged core (spike >= 90 sustained): loading / decompression / compile.
+        if (( max_sig >= 90 )); then
+            target_tdp=$(( base_target + 6 * STEP_TDP ))
+        elif (( EPOCHSECONDS - last_spike < SPIKE_HOLD )); then
+            # Regular bursts: mild bonus, 15s expiry (now includes IO bursts)
             target_tdp=$(( base_target + SPIKE_BONUS ))
         else
             target_tdp=$base_target
