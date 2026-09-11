@@ -761,6 +761,7 @@ detect_steam_appid_from_environment() {
 }
 
 detect_steam_appid_from_processes() {
+    return 1
     local pid env_data
     for pid_path in /proc/[0-9]*; do
         pid=${pid_path##*/}
