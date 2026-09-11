@@ -151,12 +151,12 @@
       "config": {
         "MIN_TDP": 8000,
         "DEFAULT_TDP": 15000,
-        "MAX_CPU_TDP": 30000,
+        "MAX_CPU_TDP": 25000,
         "STEP_TDP": 1000,
         "RYZENADJ_DELAY": 4,
         "MONITOR_INTERVAL": 4,
         "STABLE_SAMPLE_COUNT": 2,
-        "BATTERY_MAX_TDP": 22000
+        "BATTERY_MAX_TDP": 20000
       }
     },
     "rog_ally_z1": {

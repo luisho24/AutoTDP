@@ -22,7 +22,7 @@ STEP_TDP=1000  # Step increment for TDP adjustments
 
 RYZENADJ_EXEC=ryzenadj
 RYZENADJ_DELAY=4  # Delay in seconds between adjustments
-MONITOR_INTERVAL=5
+MONITOR_INTERVAL=3
 STABLE_SAMPLE_COUNT=2
 BATTERY_MAX_TDP=$MAX_CPU_TDP
 DEVICE_PROFILE="generic"
@@ -65,7 +65,26 @@ ACTIVE_STABLE_SAMPLE_COUNT=$STABLE_SAMPLE_COUNT
 ACTIVE_THRESHOLD_OFFSET=0
 
 SERVICE_FILE="/etc/systemd/system/autotdp.service"
-SCRIPT_DEST="/usr/local/bin/autotdp.sh"  # Destination for the script copy
+SCRIPT_DEST="/usr/local/bin/autotdp.sh"
+UPDATE_URL="https://raw.githubusercontent.com/aerodevxp/AutoTDP/refs/heads/main/AutoTDP.sh"
+UPDATE_CHECK_INTERVAL=21600  # Check for updates every 6 hours
+
+# ASUS WMI interface paths
+PLATFORM_PROFILE_CHOICES_PATH="/sys/firmware/acpi/platform_profile_choices"
+PLATFORM_PROFILE_PATH="/sys/firmware/acpi/platform_profile"
+
+# MCU powersave paths (checked in order)
+MCU_POWERSAVE_PATHS=(
+    "/sys/devices/platform/asus-nb-wmi/mcu_powersave"
+    "${ASUS_ARMORY_WMI_BASE}/mcu_powersave/current_value"
+)
+
+# TDP interface (detected at startup)
+USE_WMI_TDP=0
+WMI_FAST_PATH=""
+WMI_SLOW_PATH=""
+WMI_STAPM_PATH=""
+WMI_HAS_LOW_POWER=0
 
 print_usage() {
     cat <<EOF
@@ -73,6 +92,7 @@ Usage: $0 [options]
 
 Options:
   --install                 Install AutoTDP as a systemd service
+  --update                  Check for and install script updates from the aerodevxp repo
   --mode <name>             Run with a temporary mode override
   --set-mode <name>         Persist the selected mode to the config file
   --profile <name>          Run with a temporary device profile override
@@ -95,6 +115,9 @@ parse_arguments() {
                 ;;
             --install)
                 ACTION="install"
+                ;;
+            --update)
+                ACTION="update"
                 ;;
             --mode)
                 CLI_MODE_OVERRIDE=${2:-}
@@ -260,53 +283,253 @@ check_packages() {
     fi
 }
 
-# Function to set TDP values
+
+
+# Detect whether to use ASUS WMI or ryzenadj for TDP control
+detect_tdp_interface() {
+    local fast_path readback
+
+    # Prefer ASUS Armoury WMI (newer interface)
+    fast_path="$ASUS_ARMORY_FAST_WMI_PATH"
+    [[ -f "$UPDATED_ASUS_ARMORY_FAST_WMI_PATH" ]] && fast_path="$UPDATED_ASUS_ARMORY_FAST_WMI_PATH"
+
+    if [[ -f "$fast_path" ]] && [[ -f "$ASUS_ARMORY_SLOW_WMI_PATH" ]] && [[ -f "$ASUS_ARMORY_STAPM_WMI_PATH" ]]; then
+        # Test writability: write 20W and verify it actually took effect
+        printf '20\n' > "$ASUS_ARMORY_STAPM_WMI_PATH" 2>/dev/null
+        readback=$(cat "$ASUS_ARMORY_STAPM_WMI_PATH" 2>/dev/null)
+        if [[ "$readback" == "20" ]]; then
+            USE_WMI_TDP=1
+            WMI_FAST_PATH="$fast_path"
+            WMI_SLOW_PATH="$ASUS_ARMORY_SLOW_WMI_PATH"
+            WMI_STAPM_PATH="$ASUS_ARMORY_STAPM_WMI_PATH"
+
+            if [[ -f "$PLATFORM_PROFILE_CHOICES_PATH" ]] && grep -q "low-power" "$PLATFORM_PROFILE_CHOICES_PATH" 2>/dev/null; then
+                WMI_HAS_LOW_POWER=1
+            fi
+            log "Using ASUS Armoury WMI for TDP control"
+            return 0
+        else
+            log "ASUS Armoury WMI detected but not writable (wrote 20, read '$readback'), trying legacy WMI"
+        fi
+    fi
+
+    # Legacy WMI — also test with a known value
+    if [[ -f "$FAST_WMI_PATH" ]] && [[ -f "$SLOW_WMI_PATH" ]] && [[ -f "$STAPM_WMI_PATH" ]]; then
+        printf '20\n' > "$STAPM_WMI_PATH" 2>/dev/null
+        readback=$(cat "$STAPM_WMI_PATH" 2>/dev/null)
+        if [[ "$readback" == "20" ]]; then
+            USE_WMI_TDP=1
+            WMI_FAST_PATH="$FAST_WMI_PATH"
+            WMI_SLOW_PATH="$SLOW_WMI_PATH"
+            WMI_STAPM_PATH="$STAPM_WMI_PATH"
+            log "Using legacy ASUS WMI for TDP control"
+            return 0
+        else
+            log "Legacy ASUS WMI detected but not writable, falling back to ryzenadj"
+        fi
+    fi
+
+    log "Using ryzenadj for TDP control"
+}
+
+
+
+# Set TDP via ryzenadj
 set_tdp() {
     local value=$1
+    if (( value < BASE_MIN_TDP )); then
+        value=$BASE_MIN_TDP
+    fi
     if run_privileged "$RYZENADJ_EXEC" --stapm-limit "$value" --fast-limit "$value" --slow-limit "$value"; then
-        log "TDP set to $value"
+        TDP_LOG="ryzenadj ${value}mW"
     else
-        log "Failed to set TDP to $value"
+        TDP_LOG="ryzenadj FAILED ${value}mW"
     fi
 }
 
-# Function to read cumulative CPU time counters from /proc/stat
-read_cpu_times() {
-    local cpu user nice system idle iowait irq softirq steal guest guest_nice
-    read -r cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
+# Set ACPI platform profile to match TDP range (fan curves, voltage, etc.)
+set_platform_profile() {
+    local tdp_w=$(($1 / 1000))
+    local profile
 
-    local total=$((user + nice + system + idle + iowait + irq + softirq + steal))
-    local idle_total=$((idle + iowait))
+    if [[ ! -f "$PLATFORM_PROFILE_PATH" ]]; then
+        return 0
+    fi
 
-    echo "$total $idle_total"
+    # Read available profiles
+    local choices=""
+    if [[ -f "$PLATFORM_PROFILE_CHOICES_PATH" ]]; then
+        choices=$(cat "$PLATFORM_PROFILE_CHOICES_PATH" 2>/dev/null)
+    fi
+
+    # Map TDP to profile, adapting to available names
+    if (( tdp_w < 13 )); then
+        # low-power / quiet
+        if echo "$choices" | grep -q "low-power"; then
+            profile="low-power"
+        elif echo "$choices" | grep -q "quiet"; then
+            profile="quiet"
+        else
+            return 0
+        fi
+    elif (( tdp_w < 20 )); then
+        # balanced
+        if echo "$choices" | grep -q "balanced"; then
+            profile="balanced"
+        else
+            return 0
+        fi
+    else
+        # performance
+        if echo "$choices" | grep -q "performance"; then
+            profile="performance"
+        else
+            return 0
+        fi
+    fi
+
+    # Only write if different from current
+    local current
+    current=$(cat "$PLATFORM_PROFILE_PATH" 2>/dev/null)
+    if [[ "$current" != "$profile" ]]; then
+        printf '%s' "$profile" > "$PLATFORM_PROFILE_PATH" 2>/dev/null && \
+            log "Platform profile set to $profile"
+    fi
 }
 
-# Function to calculate CPU utilization percentage from two /proc/stat samples
-get_cpu_usage() {
-    local previous_total=$1
-    local previous_idle=$2
-    local current_total
-    local current_idle
-    local total_delta
-    local idle_delta
-    local busy_delta
+# Enable MCU powersave for suspend power savings
+set_mcu_powersave() {
+    local path
+    for path in "${MCU_POWERSAVE_PATHS[@]}"; do
+        if [[ -w "$path" ]]; then
+            if printf '1' > "$path" 2>/dev/null; then
+                log "MCU powersave enabled via $path"
+                return 0
+            fi
+        fi
+    done
+    # Not an error if path doesn't exist — non-ASUS devices won't have it
+}
 
-    read -r current_total current_idle < <(read_cpu_times)
+# Reads per-core cumulative CPU times as a single snapshot string
+read_core_snapshot() {
+    awk '/^cpu[0-9]+/ {printf "%s %s ", $2+$3+$4+$5+$6+$7+$8+$9, $5} END {print ""}' /proc/stat
+}
 
-    total_delta=$((current_total - previous_total))
-    idle_delta=$((current_idle - previous_idle))
 
-    if (( total_delta <= 0 )); then
-        echo "0 $current_total $current_idle"
-        return
+# Computes the busiest single core's busy percentage against the previous snapshot.
+get_max_cpu_usage() {
+    local previous=$1
+    local current
+    local top4=0 peak=0 breadth=0
+    local i n td id busy pct
+    local -a pts cts pcts
+
+    current=$(read_core_snapshot)
+
+    read -r -a pts <<< "$previous"
+    read -r -a cts <<< "$current"
+
+    n=$(( ${#cts[@]} / 2 ))
+
+    if (( ${#pts[@]} == ${#cts[@]} && n > 0 )); then
+        for ((i=0; i<n; i++)); do
+            td=$(( ${cts[i*2]} - ${pts[i*2]} ))
+            id=$(( ${cts[i*2+1]} - ${pts[i*2+1]} ))
+            if (( td <= 0 )); then
+                continue
+            fi
+            busy=$((td - id))
+            (( busy < 0 )) && busy=0
+            pct=$(( busy * 100 / td ))
+            pcts+=("$pct")
+            (( pct > peak )) && peak=$pct
+            (( pct >= 40 )) && breadth=$((breadth + 1))
+        done
+
+        if (( ${#pcts[@]} > 0 )); then
+            top4=$(printf '%s\n' "${pcts[@]}" | sort -rn | head -4 | awk '{s+=$1} END {printf "%d", s / NR}')
+        fi
     fi
 
-    busy_delta=$((total_delta - idle_delta))
-    if (( busy_delta < 0 )); then
-        busy_delta=0
+    echo "$top4 $breadth $peak $current"
+}
+
+
+# Trimmed mean of args (drops high and low); sets TM_RESULT. No forks.
+trimmed_mean() {
+    local sum=0 lo=999999 hi=0 v
+    for v in "$@"; do
+        (( v < lo )) && lo=$v
+        (( v > hi )) && hi=$v
+        (( sum += v ))
+    done
+    if (( $# > 2 )); then
+        TM_RESULT=$(( (sum - lo - hi) / ($# - 2) ))
+    else
+        TM_RESULT=$(( $# > 0 ? sum / $# : 0 ))
+    fi
+}
+
+# Pure-bash /proc/stat reader; sets SNAPSHOT. No forks.
+read_core_snapshot() {
+    local line
+    SNAPSHOT=""
+    while read -r line; do
+        case "$line" in
+            cpu[0-9]*)
+                set -- $line
+                SNAPSHOT+="$(( $2+$3+$4+$5+$6+$7+$8+$9 )) $(( $5+$6 )) "
+                ;;
+        esac
+    done < /proc/stat
+}
+
+get_max_cpu_usage() {
+    local previous=$1 current
+    local peak=0 t1=0 t2=0 t3=0 t4=0
+    local i n td id busy pct
+    local -a pts cts
+
+    read_core_snapshot
+    current=$SNAPSHOT
+
+    read -r -a pts <<< "$previous"
+    read -r -a cts <<< "$current"
+
+    n=$(( ${#cts[@]} / 2 ))
+
+    if (( ${#pts[@]} == ${#cts[@]} && n > 0 )); then
+        for ((i=0; i<n; i++)); do
+            td=$(( ${cts[i*2]} - ${pts[i*2]} ))
+            id=$(( ${cts[i*2+1]} - ${pts[i*2+1]} ))
+            (( td <= 0 )) && continue
+            busy=$((td - id))
+            (( busy < 0 )) && busy=0
+            pct=$(( busy * 100 / td ))
+            (( pct > peak )) && peak=$pct
+            if (( pct >= t1 )); then t4=$t3; t3=$t2; t2=$t1; t1=$pct
+            elif (( pct >= t2 )); then t4=$t3; t3=$t2; t2=$pct
+            elif (( pct >= t3 )); then t4=$t3; t3=$pct
+            elif (( pct >= t4 )); then t4=$pct
+            fi
+        done
     fi
 
-    echo "$(( (busy_delta * 100) / total_delta )) $current_total $current_idle"
+    CUR_TOP4=$(( (t1 + t2 + t3 + t4) / 4 ))
+    CUR_PEAK=$peak
+    CUR_SNAPSHOT=$current
+}
+
+# Max GPU busy% across cards; sets MAX_GPU. No forks.
+get_max_gpu_usage() {
+    local f gpu_pct
+    MAX_GPU=0
+    for f in /sys/class/drm/card*/device/gpu_busy_percent; do
+        [[ -r "$f" ]] || continue
+        read -r gpu_pct < "$f" 2>/dev/null || continue
+        (( gpu_pct > MAX_GPU )) && MAX_GPU=$gpu_pct
+    done
 }
 
 is_on_external_power() {
@@ -329,20 +552,6 @@ is_on_external_power() {
     done
 
     return 1
-}
-
-apply_power_source_limit() {
-    local requested_tdp=$1
-
-    if is_on_external_power; then
-        echo "$requested_tdp"
-    else
-        if (( requested_tdp > ACTIVE_BATTERY_MAX_TDP )); then
-            echo "$ACTIVE_BATTERY_MAX_TDP"
-        else
-            echo "$requested_tdp"
-        fi
-    fi
 }
 
 validate_performance_mode() {
@@ -551,32 +760,21 @@ detect_steam_appid_from_environment() {
 }
 
 detect_steam_appid_from_processes() {
-    local pid
-    local candidate
-
+    local pid env_data
     for pid_path in /proc/[0-9]*; do
         pid=${pid_path##*/}
         [[ -r "/proc/$pid/environ" ]] || continue
+        env_data=$(tr '\0' '\n' < "/proc/$pid/environ" 2> /dev/null)
 
-        candidate=$(read_env_value_from_pid "$pid" "SteamAppId")
-        if [[ -n "$candidate" && "$candidate" != "0" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-
-        candidate=$(read_env_value_from_pid "$pid" "SteamGameId")
-        if [[ -n "$candidate" && "$candidate" != "0" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-
-        candidate=$(read_env_value_from_pid "$pid" "STEAM_COMPAT_APP_ID")
-        if [[ -n "$candidate" && "$candidate" != "0" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
+        for key in SteamAppId SteamGameId STEAM_COMPAT_APP_ID; do
+            local candidate
+            candidate=$(printf '%s\n' "$env_data" | awk -F= -v k="$key" '$1 == k {print $2; exit}')
+            if [[ -n "$candidate" && "$candidate" != "0" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
     done
-
     return 1
 }
 
@@ -851,86 +1049,244 @@ apply_device_profile() {
 # Function to determine the appropriate TDP based on CPU utilization
 determine_tdp() {
     local cpu_usage=$1
-    local tdp=$MIN_TDP
-    local i
-    local threshold
+    local gpu_usage=$2
+    local effective_usage
+    local ceiling
+    local tdp
+    local ramp_start=20
+    local ramp_full=95
+    local curve_exponent=2
+    local usage_span
+    local usage_above_floor
 
-    local tdp_values=($MIN_TDP $((ACTIVE_MAX_TDP * 1 / 8)) $((ACTIVE_MAX_TDP * 1 / 4)) $((ACTIVE_MAX_TDP * 3 / 8)) \
-                $((ACTIVE_MAX_TDP * 1 / 2)) $((ACTIVE_MAX_TDP * 5 / 8)) $((ACTIVE_MAX_TDP * 3 / 4)) \
-                $((ACTIVE_MAX_TDP * 7 / 8)) $ACTIVE_MAX_TDP)
+    # Combine CPU and GPU demand: union formula accounts for both running together.
+    # Both 40% -> 64%, one pegged 99% -> ~99%, both 70% -> 91%.
+    effective_usage=$(( cpu_usage + gpu_usage - (cpu_usage * gpu_usage + 50) / 100 ))
+    if (( effective_usage > 100 )); then
+        effective_usage=100
+    fi
 
-    local cpu_load_thresholds=(0 10 20 30 40 50 60 70 80)
+    # Apply the mode's threshold offset
+    effective_usage=$(( effective_usage - ACTIVE_THRESHOLD_OFFSET ))
+    if (( effective_usage < 0 )); then
+        effective_usage=0
+    fi
 
-    for i in "${!cpu_load_thresholds[@]}"; do
-        threshold=$((cpu_load_thresholds[i] + ACTIVE_THRESHOLD_OFFSET))
-        if (( threshold < 0 )); then
-            threshold=0
-        elif (( threshold > 100 )); then
-            threshold=100
+    # Pick the ceiling based on power source
+    if is_on_external_power; then
+        ceiling=$ACTIVE_MAX_TDP
+        ramp_start=20
+    else
+        ceiling=$ACTIVE_BATTERY_MAX_TDP
+        ramp_start=30
+    fi
+
+    if (( effective_usage <= ramp_start )); then
+        tdp=$MIN_TDP
+    else
+        usage_span=$(( ramp_full - ramp_start ))
+        usage_above_floor=$(( effective_usage - ramp_start ))
+        if (( usage_above_floor > usage_span )); then
+            usage_above_floor=$usage_span
         fi
+        tdp=$(( MIN_TDP + (ceiling - MIN_TDP) * usage_above_floor ** curve_exponent / usage_span ** curve_exponent ))
+    fi
 
-        if (( cpu_usage > threshold )); then
-            tdp=${tdp_values[$i]}
-        fi
-    done
+    # Enforce floor and ceiling
+    if (( tdp < MIN_TDP )); then
+        tdp=$MIN_TDP
+    fi
+    if (( tdp > ceiling )); then
+        tdp=$ceiling
+    fi
 
     echo $(( (tdp / STEP_TDP) * STEP_TDP ))
 }
 
-# Function to monitor and adjust TDP based on CPU utilization
+# Function to monitor and adjust TDP based on CPU/GPU usage
 monitor_and_adjust() {
     local last_adjustment=0
     local current_tdp=$ACTIVE_DEFAULT_TDP
-    local previous_total
-    local previous_idle
-    local cpu_usage
-    local new_tdp
-    local limited_tdp
-    local candidate_tdp=$ACTIVE_DEFAULT_TDP
-    local stable_samples=0
+    local prev_snapshot
+    local cycle=0
+    local last_update_check=0
+    local power_state=-1
+    local new_power_state
+    local ceiling
 
-    read -r previous_total previous_idle < <(read_cpu_times)
+    # Proportional mapping: load% maps linearly onto MIN..ceiling.
+    # 90% load = full ceiling, 45% = halfway, below scales toward MIN.
+    local FULL_SCALE=90
+    local eff_full=$FULL_SCALE
 
-    resolve_active_game_profile
+    # CPU spikes: momentary busy-core bursts earn a temporary +3W
+    local SPIKE_THRESHOLD=70   # sub-sample max that counts as a spike
+    local SPIKE_BONUS=3000     # +3W
+    local SPIKE_HOLD=15        # seconds without spikes before bonus expires
+    local last_spike=0
+
+    local cpu_signal=0 gpu_usage=0 load=0 smooth_load=-1 sig=0 max_sig=0
+    local base_target target_tdp diff
+    local -a sig_samples=()
+    local -a gpu_samples=()
+
+    get_max_cpu_usage ""
+    prev_snapshot=$CUR_SNAPSHOT
+
+    set_tdp "$ACTIVE_DEFAULT_TDP"
+    set_platform_profile "$ACTIVE_DEFAULT_TDP"
+    current_tdp=$ACTIVE_DEFAULT_TDP
+    last_adjustment=$EPOCHSECONDS
 
     log "Monitoring and adjusting TDP started"
 
     while true; do
-        resolve_active_game_profile
-        sleep "$ACTIVE_MONITOR_INTERVAL"
-
-        # Get CPU utilization over the sampling window
-        read -r cpu_usage previous_total previous_idle < <(get_cpu_usage "$previous_total" "$previous_idle")
-
-        log "Current CPU usage: ${cpu_usage}%"
-
-        # Determine the new TDP and apply handheld-friendly battery cap if needed
-        new_tdp=$(determine_tdp "$cpu_usage")
-        limited_tdp=$(apply_power_source_limit "$new_tdp")
-
-        if [[ $limited_tdp == "$current_tdp" ]]; then
-            candidate_tdp=$limited_tdp
-            stable_samples=0
-            continue
-        fi
-
-        if [[ $limited_tdp == "$candidate_tdp" ]]; then
-            stable_samples=$((stable_samples + 1))
+        # Power source + ceiling, re-checked every cycle
+        if is_on_external_power; then
+            new_power_state=1
+            ceiling=$ACTIVE_MAX_TDP
         else
-            candidate_tdp=$limited_tdp
-            stable_samples=1
+            new_power_state=0
+            ceiling=$ACTIVE_BATTERY_MAX_TDP
+        fi
+        if (( new_power_state != power_state )); then
+            if (( new_power_state == 1 )); then
+                log "Power source changed: AC (ceiling $((ceiling / 1000))W)"
+            else
+                log "Power source changed: battery (ceiling $((ceiling / 1000))W)"
+            fi
+            power_state=$new_power_state
+            # Unplug: never sit above the battery ceiling
+            if (( new_power_state == 0 && current_tdp > ceiling )); then
+                set_tdp "$ceiling"
+                set_platform_profile "$ceiling"
+                log "Unplug clamp: $((current_tdp / 1000))W → $((ceiling / 1000))W via ${TDP_LOG}"
+                current_tdp=$ceiling
+                last_adjustment=$EPOCHSECONDS
+            fi
         fi
 
-        if (( stable_samples < ACTIVE_STABLE_SAMPLE_COUNT )); then
-            log "Candidate TDP $candidate_tdp waiting for stability ($stable_samples/$ACTIVE_STABLE_SAMPLE_COUNT)"
-            continue
+        # On battery, the same game needs the same watts at the same load —
+        # so the load->watt curve must hit the (lower) battery ceiling sooner.
+        # Scale the full-load point by ceiling ratio: 20W/25W -> 90% becomes 72%.
+        # Compress the battery curve ONLY under real GPU demand: the same
+        # game needs the same watts as AC, but only when it's actually
+        # pushing the GPU. Light/medium loads keep the normal curve.
+        if (( new_power_state == 1 || ACTIVE_MAX_TDP <= 0 )); then
+            eff_full=$FULL_SCALE
+        elif (( gpu_usage >= 60 )); then
+            # Clearly demanding: compress the curve
+            eff_full=$(( FULL_SCALE * ceiling / ACTIVE_MAX_TDP ))
+            (( eff_full < 50 )) && eff_full=50
+        elif (( gpu_usage < 55 )); then
+            # Clearly light: normal curve
+            eff_full=$FULL_SCALE
         fi
 
-        if (( $(($(date +%s) - last_adjustment)) >= ACTIVE_RYZENADJ_DELAY )); then
-            log "Adjusting TDP from $current_tdp to $candidate_tdp"
-            set_tdp "$candidate_tdp"
-            current_tdp=$candidate_tdp
-            last_adjustment=$(date +%s)
+        cycle=$((cycle + 1))
+        if (( cycle % 5 == 1 )); then
+            resolve_active_game_profile
+        fi
+
+        # Periodic update check
+        if (( EPOCHSECONDS - last_update_check >= UPDATE_CHECK_INTERVAL )); then
+            last_update_check=$EPOCHSECONDS
+            if download_file "$UPDATE_URL" /tmp/autotdp_check.sh 2>/dev/null \
+                && ! cmp -s /tmp/autotdp_check.sh "$SCRIPT_DEST"; then
+                log "Update available upstream - run: $0 --update"
+            fi
+            rm -f /tmp/autotdp_check.sh
+        fi
+
+        # Sub-sample the interval; trimmed mean filters momentary spikes
+        sig_samples=()
+        gpu_samples=()
+        max_sig=0
+        for (( sub=0; sub < ACTIVE_MONITOR_INTERVAL * 2; sub++ )); do
+            sleep 0.5
+            get_max_cpu_usage "$prev_snapshot"
+            prev_snapshot=$CUR_SNAPSHOT
+            sig=$(( (CUR_TOP4 + CUR_PEAK) / 2 ))
+            sig_samples+=( "$sig" )
+            (( sig > max_sig )) && max_sig=$sig
+            get_max_gpu_usage
+            gpu_samples+=( "$MAX_GPU" )
+        done
+
+        trimmed_mean "${sig_samples[@]}"; cpu_signal=$TM_RESULT
+        trimmed_mean "${gpu_samples[@]}"; gpu_usage=$TM_RESULT
+
+        # The bottleneck sets the load: whichever of CPU or GPU is higher
+        if (( gpu_usage > cpu_signal )); then
+            load=$gpu_usage
+        else
+            load=$cpu_signal
+        fi
+
+        # Smooth between cycles so single-cycle dips don't jerk the target
+        if (( smooth_load < 0 )); then
+            smooth_load=$load
+        else
+            smooth_load=$(( (smooth_load + load) / 2 ))
+        fi
+
+        # Spike activity refreshes the bonus window
+        if (( max_sig >= SPIKE_THRESHOLD)); then
+            last_spike=$EPOCHSECONDS
+        fi
+
+        log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | load: ${load}% (fulltdp@${eff_full}%) | TDP: $((current_tdp / 1000))W"
+
+        # Re-assert limits occasionally in case the EC resets them
+        if (( EPOCHSECONDS - last_adjustment > 300 )); then
+            set_tdp "$current_tdp"
+            last_adjustment=$EPOCHSECONDS
+        fi
+
+        # 90% load = ceiling, 45% = halfway, linear
+        # --- Proportional target ---
+        # Below 25% load (and GPU idle): the minimum exists precisely for this.
+        if (( smooth_load < 25 )); then
+            base_target=$MIN_TDP
+        elif (( smooth_load >= eff_full )); then
+            base_target=$ceiling
+        else
+            base_target=$(( MIN_TDP + (ceiling - MIN_TDP) * smooth_load / eff_full ))
+        fi
+
+        # --- Spike bonuses ---
+        # Pegged core (spike >= 90 sustained): loading / decompression / compile.
+        if (( max_sig >= 90 )); then
+            target_tdp=$(( base_target + 6 * STEP_TDP ))
+        elif (( EPOCHSECONDS - last_spike < SPIKE_HOLD )); then
+            # Regular bursts: mild bonus, 15s expiry (now includes IO bursts)
+            target_tdp=$(( base_target + SPIKE_BONUS ))
+        else
+            target_tdp=$base_target
+        fi
+
+        (( target_tdp > ceiling )) && target_tdp=$ceiling
+        (( target_tdp < MIN_TDP )) && target_tdp=$MIN_TDP
+
+        # Round to nearest watt: sub-0.5W down, 0.5W+ up
+        target_tdp=$(( (target_tdp + STEP_TDP * 3 / 4) / STEP_TDP * STEP_TDP ))
+        (( target_tdp < MIN_TDP )) && target_tdp=$MIN_TDP
+
+        # Up: jump straight to target. Down: at most 2W per write.
+        if (( target_tdp < current_tdp )); then
+            (( current_tdp - target_tdp > 2 * STEP_TDP )) && target_tdp=$(( current_tdp - 2 * STEP_TDP ))
+        fi
+
+        # Deadband: ignore sub-0.5W churn
+        diff=$(( target_tdp - current_tdp ))
+        (( diff < 0 )) && diff=$(( -diff ))
+        if (( diff > 500 && EPOCHSECONDS - last_adjustment >= ACTIVE_RYZENADJ_DELAY )); then
+            local old_tdp=$current_tdp
+            set_tdp "$target_tdp"
+            set_platform_profile "$target_tdp"
+            current_tdp=$target_tdp
+            last_adjustment=$EPOCHSECONDS
+            log "TDP: $((old_tdp / 1000))W → $((target_tdp / 1000))W via ${TDP_LOG} (load ${load}%, smooth ${smooth_load}%)"
         fi
     done
 }
@@ -947,6 +1303,7 @@ cleanup() {
     fi
 
     set_tdp "$ACTIVE_DEFAULT_TDP"
+    set_platform_profile "$ACTIVE_DEFAULT_TDP"
     log "Script exited, TDP reset to default for mode $PERFORMANCE_MODE"
     exit "$EXIT_STATUS"
 }
@@ -974,9 +1331,61 @@ EOF
 
     run_privileged systemctl daemon-reload
     run_privileged systemctl enable autotdp.service
-    run_privileged systemctl start autotdp.service
+    run_privileged systemctl restart autotdp.service
 
     log "AutoTDP service installed and started"
+}
+
+download_file() {
+    local url=$1
+    local dest=$2
+
+    if command -v curl > /dev/null 2>&1; then
+        curl -fsSL --connect-timeout 10 --max-time 60 "$url" -o "$dest"
+    elif command -v wget > /dev/null 2>&1; then
+        wget -q --timeout=60 -O "$dest" "$url"
+    else
+        return 1
+    fi
+}
+
+perform_self_update() {
+    local tmp_file
+
+    tmp_file=$(mktemp)
+
+    if ! download_file "$UPDATE_URL" "$tmp_file"; then
+        rm -f "$tmp_file"
+        log "Self-update: download failed, keeping current version"
+        return 1
+    fi
+
+    # Validate: non-empty, looks like AutoTDP, parses as valid bash
+    if [[ ! -s "$tmp_file" ]] || ! grep -q "AutoTDP" "$tmp_file" || ! bash -n "$tmp_file"; then
+        rm -f "$tmp_file"
+        log "Self-update: downloaded file failed validation, keeping current version"
+        return 1
+    fi
+
+    if [[ -f "$SCRIPT_DEST" ]] && cmp -s "$tmp_file" "$SCRIPT_DEST"; then
+        rm -f "$tmp_file"
+        return 0
+    fi
+
+    run_privileged install -m 0755 "$tmp_file" "$SCRIPT_DEST"
+    rm -f "$tmp_file"
+    log "Self-update: new version installed to $SCRIPT_DEST"
+
+    run_privileged restorecon -v /usr/local/bin/autotdp.sh
+
+    if command -v systemctl > /dev/null 2>&1 && [[ -f "$SERVICE_FILE" ]] \
+        && systemctl is-active --quiet autotdp.service; then
+        log "Self-update: restarting autotdp.service"
+        run_privileged systemctl restart autotdp.service
+        exit 0
+    fi
+
+    return 0
 }
 
 create_default_config() {
@@ -1054,6 +1463,8 @@ source "$CONFIG_FILE"
 
 # Check for required packages before attempting to parse profile JSON
 check_packages
+
+set_mcu_powersave
 
 if [[ -n "$CLI_PROFILE_OVERRIDE" ]]; then
     DEVICE_PROFILE=$CLI_PROFILE_OVERRIDE
@@ -1144,6 +1555,12 @@ if [[ $ACTION == "install" ]]; then
     SKIP_CLEANUP=1
     install_service
     exit 0
+fi
+
+if [[ $ACTION == "update" ]]; then
+    SKIP_CLEANUP=1
+    perform_self_update
+    exit $?
 fi
 
 # Start monitoring and adjusting TDP
