@@ -941,8 +941,9 @@ monitor_and_adjust() {
     local candidate_tdp=$ACTIVE_DEFAULT_TDP
     local stable_samples=0
     local last_update_check=0
-    local decay_pct=100
-    local decay_remember=100
+    local knee_remember=0
+    local was_demand=0
+    local curve_tdp=0
     local calm_cycles=0
     local apu_draw=0
     local burst_cap
@@ -1015,35 +1016,62 @@ monitor_and_adjust() {
             fi
         fi
 
-        # --- Comfort decay: probe the ceiling down while the game is comfortable ---
+        # --- Comfort controller: hold the knee, probe down when comfortable ---
         apu_draw=$(get_apu_power_w || echo 0)
+        curve_tdp=$limited_tdp   # the curve + burst-cap answer, saved
 
         if (( cpu_signal >= 85 || gpu_usage >= 85 )); then
-            # Hard demand (loading, heavy scene): full curve, instantly.
-            # Remember where we were, plus a margin so we don't dive
-            # straight back to a level that may have caused the spike.
-            decay_remember=$((decay_pct + 10))
-            (( decay_remember > 100 )) && decay_remember=100
-            decay_pct=100
-            calm_cycles=0
-        elif (( cpu_signal < 60 && gpu_usage < 55 )); then
-            # Comfortable: the ceiling is being wasted, probe downward
-            calm_cycles=$((calm_cycles + 1))
-            if (( decay_pct > decay_remember )); then
-                # Re-descending to the last known good level: fast
-                if (( calm_cycles >= 2 )); then
-                    decay_pct=$((decay_pct - 5))
-                    calm_cycles=0
-                fi
-            elif (( calm_cycles >= 10 && decay_pct > 60 )); then
-                # Probing below the last known level: careful
-                decay_pct=$((decay_pct - 5))
-                calm_cycles=0
-                log "Comfort decay: usage ${cpu_signal}/${gpu_usage}, draw ${apu_draw}W, decay now ${decay_pct}%"
+            # Hard demand (loading, heavy scene): take the curve's answer.
+            # Edge-triggered: remember the pre-spike level once per episode.
+            if (( was_demand == 0 )); then
+                knee_remember=$(( current_tdp + STEP_TDP ))
+                was_demand=1
             fi
+            calm_cycles=0
+        elif (( cpu_signal >= 80 || gpu_usage >= 80 )); then
+            # Near-demand: climb one step toward the curve's answer
+            limited_tdp=$(( current_tdp + STEP_TDP ))
+            if (( limited_tdp > curve_tdp )); then
+                limited_tdp=$curve_tdp
+            fi
+            was_demand=0
+        elif (( cpu_signal < 60 && gpu_usage < 55 )); then
+            # Comfortable: probe downward from where we are
+            calm_cycles=$((calm_cycles + 1))
+            if (( knee_remember > 0 && current_tdp > knee_remember )); then
+                # Post-loading: redescend quickly to the last known-good level
+                if (( calm_cycles >= 2 )); then
+                    limited_tdp=$(( current_tdp - STEP_TDP ))
+                    calm_cycles=0
+                else
+                    limited_tdp=$current_tdp
+                fi
+            elif (( calm_cycles >= 10 )); then
+                # Careful probing below the known-good level
+                limited_tdp=$(( current_tdp - STEP_TDP ))
+                if (( limited_tdp < MIN_TDP )); then
+                    limited_tdp=$MIN_TDP
+                fi
+                calm_cycles=0
+                log "Comfort decay: usage ${cpu_signal}/${gpu_usage}, draw ${apu_draw}W, probing lower"
+            else
+                limited_tdp=$current_tdp
+            fi
+            was_demand=0
+        else
+            # Deadband (60-80): this is the knee. HOLD the current level;
+            # the curve does not get to reinterpret moderate usage as demand.
+            limited_tdp=$current_tdp
+            was_demand=0
         fi
 
-        limited_tdp=$(( limited_tdp * decay_pct / 100 ))
+        # Deep idle (game closed): let the curve pull down at ramp speed
+        if (( cpu_signal < 25 && gpu_usage < 25 && curve_tdp < limited_tdp )); then
+            limited_tdp=$curve_tdp
+        fi
+
+        
+
         if (( limited_tdp < MIN_TDP )); then
             limited_tdp=$MIN_TDP
         fi
