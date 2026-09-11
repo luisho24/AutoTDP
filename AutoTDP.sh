@@ -985,6 +985,7 @@ monitor_and_adjust() {
     # Proportional mapping: load% maps linearly onto MIN..ceiling.
     # 90% load = full ceiling, 45% = halfway, below scales toward MIN.
     local FULL_SCALE=90
+    local eff_full=$FULL_SCALE
 
     # CPU spikes: momentary busy-core bursts earn a temporary +3W
     local SPIKE_THRESHOLD=70   # sub-sample max that counts as a spike
@@ -1028,6 +1029,16 @@ monitor_and_adjust() {
                 current_tdp=$ceiling
                 last_adjustment=$EPOCHSECONDS
             fi
+        fi
+
+        # On battery, the same game needs the same watts at the same load —
+        # so the load->watt curve must hit the (lower) battery ceiling sooner.
+        # Scale the full-load point by ceiling ratio: 20W/25W -> 90% becomes 72%.
+        if (( new_power_state == 1 || ACTIVE_MAX_TDP <= 0 )); then
+            eff_full=$FULL_SCALE
+        else
+            eff_full=$(( FULL_SCALE * ceiling / ACTIVE_MAX_TDP ))
+            (( eff_full < 50 )) && eff_full=50   # sanity floor
         fi
 
         cycle=$((cycle + 1))
@@ -1082,7 +1093,7 @@ monitor_and_adjust() {
             last_spike=$EPOCHSECONDS
         fi
 
-        log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | load: ${load}% | TDP: $((current_tdp / 1000))W"
+        log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | load: ${load}% (full@${eff_full}) | TDP: $((current_tdp / 1000))W"
 
         # Re-assert limits occasionally in case the EC resets them
         if (( EPOCHSECONDS - last_adjustment > 300 )); then
@@ -1095,10 +1106,10 @@ monitor_and_adjust() {
         # Below 25% load (and GPU idle): the minimum exists precisely for this.
         if (( smooth_load < 25 )); then
             base_target=$MIN_TDP
-        elif (( smooth_load >= FULL_SCALE )); then
+        elif (( smooth_load >= eff_full )); then
             base_target=$ceiling
         else
-            base_target=$(( MIN_TDP + (ceiling - MIN_TDP) * smooth_load / FULL_SCALE ))
+            base_target=$(( MIN_TDP + (ceiling - MIN_TDP) * smooth_load / eff_full ))
         fi
 
         # --- Spike bonuses ---
