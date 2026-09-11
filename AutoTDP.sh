@@ -1100,7 +1100,7 @@ monitor_and_adjust() {
             last_spike=$EPOCHSECONDS
         fi
 
-        log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | load: ${load}% (full@${eff_full}) | TDP: $((current_tdp / 1000))W"
+        log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | load: ${load}% (fulltdp@${eff_full}%) | TDP: $((current_tdp / 1000))W"
 
         # Re-assert limits occasionally in case the EC resets them
         if (( EPOCHSECONDS - last_adjustment > 300 )); then
