@@ -70,14 +70,6 @@ UPDATE_URL="https://raw.githubusercontent.com/aerodevxp/AutoTDP/refs/heads/main/
 UPDATE_CHECK_INTERVAL=21600  # Check for updates every 6 hours
 
 # ASUS WMI interface paths
-ASUS_ARMORY_WMI_BASE="/sys/class/firmware-attributes/asus-armoury/attributes"
-FAST_WMI_PATH="/sys/devices/platform/asus-nb-wmi/ppt_fppt"
-SLOW_WMI_PATH="/sys/devices/platform/asus-nb-wmi/ppt_pl2_sppt"
-STAPM_WMI_PATH="/sys/devices/platform/asus-nb-wmi/ppt_pl1_spl"
-ASUS_ARMORY_FAST_WMI_PATH="${ASUS_ARMORY_WMI_BASE}/ppt_fppt/current_value"
-ASUS_ARMORY_SLOW_WMI_PATH="${ASUS_ARMORY_WMI_BASE}/ppt_pl2_sppt/current_value"
-ASUS_ARMORY_STAPM_WMI_PATH="${ASUS_ARMORY_WMI_BASE}/ppt_pl1_spl/current_value"
-UPDATED_ASUS_ARMORY_FAST_WMI_PATH="${ASUS_ARMORY_WMI_BASE}/ppt_pl3_fppt/current_value"
 PLATFORM_PROFILE_CHOICES_PATH="/sys/firmware/acpi/platform_profile_choices"
 PLATFORM_PROFILE_PATH="/sys/firmware/acpi/platform_profile"
 
@@ -340,95 +332,18 @@ detect_tdp_interface() {
     log "Using ryzenadj for TDP control"
 }
 
-# Set TDP via ASUS WMI interface (writes in watts, not milliwatts)
-set_tdp_wmi() {
-    local value_mw=$1
-    local value_w=$((value_mw / 1000))
 
-    # WMI enforces minimums: fast/slow ≥ 15W, stapm ≥ 7W on Ally X.
-    # For TDP < 15W, ryzenadj can set all three limits consistently,
-    # while WMI would leave fast/slow at 15W (different effective behavior).
-    if (( value_w < 15 )); then
-        TDP_LOG="ryzenadj ${value_mw}mW (WMI minimum 15W)"
-        set_tdp_ryzenadj "$value_mw"
-        return $?
-    fi
 
-    local fast_tdp=$value_w
-    local slow_tdp=$value_w
-    local stapm_tdp=$value_w
-    local note=""
-
-    # Apply firmware maximums if low-power mode is detected
-    if (( WMI_HAS_LOW_POWER == 1 )); then
-        (( fast_tdp > 53 )) && { fast_tdp=53; note="clamped"; }
-        (( slow_tdp > 43 )) && { slow_tdp=43; note="clamped"; }
-        (( stapm_tdp > 30 )) && { stapm_tdp=30; note="clamped"; }
-    fi
-
-    local readback
-
-    # Write fast limit and verify
-    printf '%s\n' "$fast_tdp" > "$WMI_FAST_PATH" 2>/dev/null
-    sleep 0.1
-    readback=$(cat "$WMI_FAST_PATH" 2>/dev/null)
-    if [[ "$readback" != "$fast_tdp" ]]; then
-        log "WMI fast rejected: wrote $fast_tdp, read '$readback'"
-        log "WMI write failed, falling back to ryzenadj"
-        set_tdp_ryzenadj "$value_mw"
-        return $?
-    fi
-
-    # Write slow limit and verify
-    printf '%s\n' "$slow_tdp" > "$WMI_SLOW_PATH" 2>/dev/null
-    sleep 0.1
-    readback=$(cat "$WMI_SLOW_PATH" 2>/dev/null)
-    if [[ "$readback" != "$slow_tdp" ]]; then
-        log "WMI slow rejected: wrote $slow_tdp, read '$readback'"
-        log "WMI write failed, falling back to ryzenadj"
-        set_tdp_ryzenadj "$value_mw"
-        return $?
-    fi
-
-    # Write stapm limit and verify
-    printf '%s\n' "$stapm_tdp" > "$WMI_STAPM_PATH" 2>/dev/null
-    sleep 0.1
-    readback=$(cat "$WMI_STAPM_PATH" 2>/dev/null)
-    if [[ "$readback" != "$stapm_tdp" ]]; then
-        log "WMI stapm rejected: wrote $stapm_tdp, read '$readback'"
-        log "WMI write failed, falling back to ryzenadj"
-        set_tdp_ryzenadj "$value_mw"
-        return $?
-    fi
-
-    TDP_LOG="WMI ${value_w}W f=${fast_tdp} s=${slow_tdp} st=${stapm_tdp}${note:+ [${note}]}"
-    return 0
-}
-
-# Set TDP via ryzenadj (original method)
-set_tdp_ryzenadj() {
-    local value=$1
-    if run_privileged "$RYZENADJ_EXEC" --stapm-limit "$value" --fast-limit "$value" --slow-limit "$value"; then
-        TDP_LOG="ryzenadj ${value}mW"
-        return 0
-    else
-        TDP_LOG="ryzenadj FAILED ${value}mW"
-        return 1
-    fi
-}
-
-# Set TDP using whichever interface is available
+# Set TDP via ryzenadj
 set_tdp() {
     local value=$1
     if (( value < BASE_MIN_TDP )); then
         value=$BASE_MIN_TDP
     fi
-
-    TDP_LOG=""
-    if (( USE_WMI_TDP == 1 )); then
-        set_tdp_wmi "$value"
+    if run_privileged "$RYZENADJ_EXEC" --stapm-limit "$value" --fast-limit "$value" --slow-limit "$value"; then
+        TDP_LOG="ryzenadj ${value}mW"
     else
-        set_tdp_ryzenadj "$value"
+        TDP_LOG="ryzenadj FAILED ${value}mW"
     fi
 }
 
@@ -1549,9 +1464,7 @@ source "$CONFIG_FILE"
 # Check for required packages before attempting to parse profile JSON
 check_packages
 
-detect_tdp_interface
 set_mcu_powersave
-log "WMI detection: USE_WMI_TDP=$USE_WMI_TDP WMI_FAST_PATH=$WMI_FAST_PATH WMI_HAS_LOW_POWER=$WMI_HAS_LOW_POWER"
 
 if [[ -n "$CLI_PROFILE_OVERRIDE" ]]; then
     DEVICE_PROFILE=$CLI_PROFILE_OVERRIDE
