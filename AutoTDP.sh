@@ -70,6 +70,7 @@ UPDATE_URL="https://raw.githubusercontent.com/aerodevxp/AutoTDP/refs/heads/main/
 UPDATE_CHECK_INTERVAL=21600  # Check for updates every 6 hours
 
 # ASUS WMI interface paths
+ASUS_ARMORY_WMI_BASE="/sys/class/firmware-attributes/asus-armoury/attributes"
 PLATFORM_PROFILE_CHOICES_PATH="/sys/firmware/acpi/platform_profile_choices"
 PLATFORM_PROFILE_PATH="/sys/firmware/acpi/platform_profile"
 
@@ -1377,6 +1378,7 @@ perform_self_update() {
     log "Self-update: new version installed to $SCRIPT_DEST"
 
     run_privileged restorecon -v /usr/local/bin/autotdp.sh
+
 
     if command -v systemctl > /dev/null 2>&1 && [[ -f "$SERVICE_FILE" ]] \
         && systemctl is-active --quiet autotdp.service; then
