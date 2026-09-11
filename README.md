@@ -4,9 +4,9 @@ AutoTDP is a Bash script that adjusts AMD APU TDP dynamically with `ryzenadj` ba
 
 ## Features
 
-- Uses Peak CPU Core AND GPU utilization sampled from `/proc/stat` instead of relying on `loadavg`
+- Uses both CPU AND/OR GPU utilization for both CPU-bound and GPU-bound games
 - Reduces TDP oscillation with a stable-sample requirement before applying changes
-- TDP will max out for loading and installing games for lightning fast data transfer (temporarily when one CPU core is at peak usage, then slowly ramps back down)
+- TDP will increase for shader compilation and data transfers (temporarily when one CPU core is at peak usage, then slowly ramps back down)
 - Supports an optional battery cap for handheld-friendly behavior away from the charger
 - Loads device-specific presets from `known_devices.json`
 - Includes presets for AMD handhelds and AMD laptops
@@ -16,6 +16,7 @@ AutoTDP is a Bash script that adjusts AMD APU TDP dynamically with `ryzenadj` ba
 - Keeps configuration in `/etc/AutoTDP/AutoTDP.config`
 - Logs all actions to `/etc/AutoTDP/logs/`
 - Can install itself as an optional `systemd` service
+- Easy update by running /usr/local/bin/autotdp.sh --update
 
 ## Linux Compatibility
 
