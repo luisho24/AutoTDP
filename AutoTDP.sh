@@ -284,6 +284,48 @@ read_core_snapshot() {
     awk '/^cpu[0-9]+/ {printf "%s %s ", $2+$3+$4+$5+$6+$7+$8+$9, $5} END {print ""}' /proc/stat
 }
 
+read_io_snapshot() {
+    local line name io_ticks
+    IO_SNAPSHOT=""
+    while read -r line; do
+        set -- $line
+        name=$3
+        io_ticks=${13}
+        case "$name" in
+            nvme*|sd*|dm-*)
+                IO_SNAPSHOT+="$name $io_ticks "
+                ;;
+        esac
+    done < /proc/diskstats
+}
+
+
+# Sets IO_BUSY to the max busy-ms delta across physical devices vs previous snapshot.
+get_io_busy() {
+    local previous=$1 current
+    local -a pts cts
+    local i n pd pc busy max_busy=0
+
+    read_io_snapshot
+    current=$IO_SNAPSHOT
+
+    read -r -a pts <<< "$previous"
+    read -r -a cts <<< "$current"
+
+    n=$(( ${#cts[@]} / 2 ))
+    if (( ${#pts[@]} == ${#cts[@]} && n > 0 )); then
+        for ((i=0; i<n; i++)); do
+            pc=${cts[i*2+1]}
+            pd=${pts[i*2+1]}
+            (( pc < pd )) && continue
+            busy=$(( pc - pd ))
+            (( busy > max_busy )) && max_busy=$busy
+        done
+    fi
+    IO_BUSY=$max_busy
+    IO_SNAPSHOT_PREV=$current
+}
+
 # Computes the busiest single core's busy percentage against the previous snapshot.
 get_max_cpu_usage() {
     local previous=$1
@@ -996,8 +1038,15 @@ monitor_and_adjust() {
     local -a sig_samples=()
     local -a gpu_samples=()
 
+    local IO_SPIKE_MS=250    # device busy >= 250ms of a 500ms sample = loading
+    local io_busy=0
+    local prev_io=""
+
     get_max_cpu_usage ""
     prev_snapshot=$CUR_SNAPSHOT
+
+    read_io_snapshot
+    prev_io=$IO_SNAPSHOT_PREV
 
     set_tdp "$ACTIVE_DEFAULT_TDP"
     current_tdp=$ACTIVE_DEFAULT_TDP
@@ -1057,6 +1106,9 @@ monitor_and_adjust() {
             (( sig > max_sig )) && max_sig=$sig
             get_max_gpu_usage
             gpu_samples+=( "$MAX_GPU" )
+            get_io_busy "$prev_io"
+            prev_io=$IO_SNAPSHOT_PREV
+            (( io_busy < IO_BUSY )) && io_busy=$IO_BUSY
         done
 
         trimmed_mean "${sig_samples[@]}"; cpu_signal=$TM_RESULT
@@ -1077,11 +1129,11 @@ monitor_and_adjust() {
         fi
 
         # Spike activity refreshes the bonus window
-        if (( max_sig >= SPIKE_THRESHOLD )); then
+        if (( max_sig >= SPIKE_THRESHOLD || io_busy >= IO_SPIKE_MS )); then
             last_spike=$EPOCHSECONDS
         fi
 
-        log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | load: ${load}% | TDP: $((current_tdp / 1000))W"
+        log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | io: ${io_busy}ms | load: ${load}% | TDP: $((current_tdp / 1000))W"
 
         # Re-assert limits occasionally in case the EC resets them
         if (( EPOCHSECONDS - last_adjustment > 300 )); then
@@ -1206,6 +1258,8 @@ perform_self_update() {
     run_privileged install -m 0755 "$tmp_file" "$SCRIPT_DEST"
     rm -f "$tmp_file"
     log "Self-update: new version installed to $SCRIPT_DEST"
+
+    run_privileged restorecon -v /usr/local/bin/autotdp.sh
 
     if command -v systemctl > /dev/null 2>&1 && [[ -f "$SERVICE_FILE" ]] \
         && systemctl is-active --quiet autotdp.service; then
