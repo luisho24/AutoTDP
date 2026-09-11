@@ -69,6 +69,31 @@ SCRIPT_DEST="/usr/local/bin/autotdp.sh"
 UPDATE_URL="https://raw.githubusercontent.com/aerodevxp/AutoTDP/refs/heads/main/AutoTDP.sh"
 UPDATE_CHECK_INTERVAL=21600  # Check for updates every 6 hours
 
+# ASUS WMI interface paths
+ASUS_ARMORY_WMI_BASE="/sys/class/firmware-attributes/asus-armoury/attributes"
+FAST_WMI_PATH="/sys/devices/platform/asus-nb-wmi/ppt_fppt"
+SLOW_WMI_PATH="/sys/devices/platform/asus-nb-wmi/ppt_pl2_sppt"
+STAPM_WMI_PATH="/sys/devices/platform/asus-nb-wmi/ppt_pl1_spl"
+ASUS_ARMORY_FAST_WMI_PATH="${ASUS_ARMORY_WMI_BASE}/ppt_fppt/current_value"
+ASUS_ARMORY_SLOW_WMI_PATH="${ASUS_ARMORY_WMI_BASE}/ppt_pl2_sppt/current_value"
+ASUS_ARMORY_STAPM_WMI_PATH="${ASUS_ARMORY_WMI_BASE}/ppt_pl1_spl/current_value"
+UPDATED_ASUS_ARMORY_FAST_WMI_PATH="${ASUS_ARMORY_WMI_BASE}/ppt_pl3_fppt/current_value"
+PLATFORM_PROFILE_CHOICES_PATH="/sys/firmware/acpi/platform_profile_choices"
+PLATFORM_PROFILE_PATH="/sys/firmware/acpi/platform_profile"
+
+# MCU powersave paths (checked in order)
+MCU_POWERSAVE_PATHS=(
+    "/sys/devices/platform/asus-nb-wmi/mcu_powersave"
+    "${ASUS_ARMORY_WMI_BASE}/mcu_powersave/current_value"
+)
+
+# TDP interface (detected at startup)
+USE_WMI_TDP=0
+WMI_FAST_PATH=""
+WMI_SLOW_PATH=""
+WMI_STAPM_PATH=""
+WMI_HAS_LOW_POWER=0
+
 print_usage() {
     cat <<EOF
 Usage: $0 [options]
@@ -266,17 +291,163 @@ check_packages() {
     fi
 }
 
-# Function to set TDP values
+
+
+# Detect whether to use ASUS WMI or ryzenadj for TDP control
+detect_tdp_interface() {
+    # Prefer ASUS Armoury WMI (newer interface)
+    local fast_path="$ASUS_ARMORY_FAST_WMI_PATH"
+    [[ -f "$UPDATED_ASUS_ARMORY_FAST_WMI_PATH" ]] && fast_path="$UPDATED_ASUS_ARMORY_FAST_WMI_PATH"
+
+    if [[ -f "$fast_path" ]] && [[ -f "$ASUS_ARMORY_SLOW_WMI_PATH" ]] && [[ -f "$ASUS_ARMORY_STAPM_WMI_PATH" ]]; then
+        USE_WMI_TDP=1
+        WMI_FAST_PATH="$fast_path"
+        WMI_SLOW_PATH="$ASUS_ARMORY_SLOW_WMI_PATH"
+        WMI_STAPM_PATH="$ASUS_ARMORY_STAPM_WMI_PATH"
+
+        # Newer Armoury firmware enforces different min/max per limit
+        if [[ -f "$PLATFORM_PROFILE_CHOICES_PATH" ]] && grep -q "low-power" "$PLATFORM_PROFILE_CHOICES_PATH" 2>/dev/null; then
+            WMI_HAS_LOW_POWER=1
+        fi
+        log "Using ASUS Armoury WMI for TDP control"
+        return 0
+    fi
+
+    # Legacy WMI
+    if [[ -f "$FAST_WMI_PATH" ]] && [[ -f "$SLOW_WMI_PATH" ]] && [[ -f "$STAPM_WMI_PATH" ]]; then
+        USE_WMI_TDP=1
+        WMI_FAST_PATH="$FAST_WMI_PATH"
+        WMI_SLOW_PATH="$SLOW_WMI_PATH"
+        WMI_STAPM_PATH="$STAPM_WMI_PATH"
+        log "Using legacy ASUS WMI for TDP control"
+        return 0
+    fi
+
+    log "Using ryzenadj for TDP control"
+}
+
+# Set TDP via ASUS WMI interface (writes in watts, not milliwatts)
+set_tdp_wmi() {
+    local value_mw=$1
+    local value_w=$((value_mw / 1000))
+    local fast_tdp=$value_w
+    local slow_tdp=$value_w
+    local stapm_tdp=$value_w
+    local note=""
+
+    # Newer Armoury firmware enforces per-limit min/max
+    if (( WMI_HAS_LOW_POWER == 1 )); then
+        (( fast_tdp < 15 )) && { fast_tdp=15; note="clamped"; }
+        (( slow_tdp < 15 )) && { slow_tdp=15; note="clamped"; }
+        (( stapm_tdp < 7 )) && { stapm_tdp=7; note="clamped"; }
+        (( fast_tdp > 53 )) && { fast_tdp=53; note="clamped"; }
+        (( slow_tdp > 43 )) && { slow_tdp=43; note="clamped"; }
+        (( stapm_tdp > 30 )) && { stapm_tdp=30; note="clamped"; }
+    fi
+
+    if printf '%s' "$fast_tdp" > "$WMI_FAST_PATH" 2>/dev/null \
+       && sleep 0.1 \
+       && printf '%s' "$slow_tdp" > "$WMI_SLOW_PATH" 2>/dev/null \
+       && sleep 0.1 \
+       && printf '%s' "$stapm_tdp" > "$WMI_STAPM_PATH" 2>/dev/null; then
+        TDP_LOG="WMI ${value_w}W f=${fast_tdp} s=${slow_tdp} st=${stapm_tdp}${note:+ [${note}]}"
+        return 0
+    else
+        log "WMI write failed, falling back to ryzenadj"
+        set_tdp_ryzenadj "$value_mw"
+        return $?
+    fi
+}
+
+# Set TDP via ryzenadj (original method)
+set_tdp_ryzenadj() {
+    local value=$1
+    if run_privileged "$RYZENADJ_EXEC" --stapm-limit "$value" --fast-limit "$value" --slow-limit "$value"; then
+        TDP_LOG="ryzenadj ${value}mW"
+        return 0
+    else
+        TDP_LOG="ryzenadj FAILED ${value}mW"
+        return 1
+    fi
+}
+
+# Set TDP using whichever interface is available
 set_tdp() {
     local value=$1
     if (( value < BASE_MIN_TDP )); then
         value=$BASE_MIN_TDP
     fi
-    if run_privileged "$RYZENADJ_EXEC" --stapm-limit "$value" --fast-limit "$value" --slow-limit "$value"; then
-        log "TDP set to $value"
+
+    TDP_LOG=""
+    if (( USE_WMI_TDP == 1 )); then
+        set_tdp_wmi "$value"
     else
-        log "Failed to set TDP to $value"
+        set_tdp_ryzenadj "$value"
     fi
+}
+
+# Set ACPI platform profile to match TDP range (fan curves, voltage, etc.)
+set_platform_profile() {
+    local tdp_w=$(($1 / 1000))
+    local profile
+
+    if [[ ! -f "$PLATFORM_PROFILE_PATH" ]]; then
+        return 0
+    fi
+
+    # Read available profiles
+    local choices=""
+    if [[ -f "$PLATFORM_PROFILE_CHOICES_PATH" ]]; then
+        choices=$(cat "$PLATFORM_PROFILE_CHOICES_PATH" 2>/dev/null)
+    fi
+
+    # Map TDP to profile, adapting to available names
+    if (( tdp_w < 13 )); then
+        # low-power / quiet
+        if echo "$choices" | grep -q "low-power"; then
+            profile="low-power"
+        elif echo "$choices" | grep -q "quiet"; then
+            profile="quiet"
+        else
+            return 0
+        fi
+    elif (( tdp_w < 20 )); then
+        # balanced
+        if echo "$choices" | grep -q "balanced"; then
+            profile="balanced"
+        else
+            return 0
+        fi
+    else
+        # performance
+        if echo "$choices" | grep -q "performance"; then
+            profile="performance"
+        else
+            return 0
+        fi
+    fi
+
+    # Only write if different from current
+    local current
+    current=$(cat "$PLATFORM_PROFILE_PATH" 2>/dev/null)
+    if [[ "$current" != "$profile" ]]; then
+        printf '%s' "$profile" > "$PLATFORM_PROFILE_PATH" 2>/dev/null && \
+            log "Platform profile set to $profile"
+    fi
+}
+
+# Enable MCU powersave for suspend power savings
+set_mcu_powersave() {
+    local path
+    for path in "${MCU_POWERSAVE_PATHS[@]}"; do
+        if [[ -w "$path" ]]; then
+            if printf '1' > "$path" 2>/dev/null; then
+                log "MCU powersave enabled via $path"
+                return 0
+            fi
+        fi
+    done
+    # Not an error if path doesn't exist — non-ASUS devices won't have it
 }
 
 # Reads per-core cumulative CPU times as a single snapshot string
@@ -1002,6 +1173,7 @@ monitor_and_adjust() {
     prev_snapshot=$CUR_SNAPSHOT
 
     set_tdp "$ACTIVE_DEFAULT_TDP"
+    set_platform_profile "$ACTIVE_DEFAULT_TDP"
     current_tdp=$ACTIVE_DEFAULT_TDP
     last_adjustment=$EPOCHSECONDS
 
@@ -1026,6 +1198,8 @@ monitor_and_adjust() {
             # Unplug: never sit above the battery ceiling
             if (( new_power_state == 0 && current_tdp > ceiling )); then
                 set_tdp "$ceiling"
+                set_platform_profile "$ceiling"
+                log "Unplug clamp: $((current_tdp / 1000))W → $((ceiling / 1000))W via ${TDP_LOG}"
                 current_tdp=$ceiling
                 last_adjustment=$EPOCHSECONDS
             fi
@@ -1147,7 +1321,9 @@ monitor_and_adjust() {
         (( diff < 0 )) && diff=$(( -diff ))
         if (( diff > 500 && EPOCHSECONDS - last_adjustment >= ACTIVE_RYZENADJ_DELAY )); then
             log "Adjusting TDP from $current_tdp to $target_tdp (load ${load}%, smooth ${smooth_load}%)"
+            log "TDP: $((current_tdp / 1000))W → $((target_tdp / 1000))W via ${TDP_LOG} (load ${load}%, smooth ${smooth_load}%)"
             set_tdp "$target_tdp"
+            set_platform_profile "$target_tdp"
             current_tdp=$target_tdp
             last_adjustment=$EPOCHSECONDS
         fi
@@ -1166,6 +1342,7 @@ cleanup() {
     fi
 
     set_tdp "$ACTIVE_DEFAULT_TDP"
+    set_platform_profile "$ACTIVE_DEFAULT_TDP"
     log "Script exited, TDP reset to default for mode $PERFORMANCE_MODE"
     exit "$EXIT_STATUS"
 }
@@ -1325,6 +1502,9 @@ source "$CONFIG_FILE"
 
 # Check for required packages before attempting to parse profile JSON
 check_packages
+
+detect_tdp_interface
+set_mcu_powersave
 
 if [[ -n "$CLI_PROFILE_OVERRIDE" ]]; then
     DEVICE_PROFILE=$CLI_PROFILE_OVERRIDE
