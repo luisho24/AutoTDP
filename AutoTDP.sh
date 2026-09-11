@@ -292,7 +292,8 @@ read_io_snapshot() {
         name=$3
         io_ticks=${13}
         case "$name" in
-            nvme*|sd*|dm-*)
+            loop*|ram*|zram*|fd*|sr*|md*) ;;
+            nvme*|mmcblk*|sd*|dm-*|vd*|hd*)
                 IO_SNAPSHOT+="$name $io_ticks "
                 ;;
         esac
@@ -300,11 +301,11 @@ read_io_snapshot() {
 }
 
 
-# Sets IO_BUSY to the max busy-ms delta across physical devices vs previous snapshot.
+# Sets IO_BUSY to the max busy-ms delta vs previous snapshot.
 get_io_busy() {
     local previous=$1 current
     local -a pts cts
-    local i n pd pc busy max_busy=0
+    local i n name pkey pval busy max_busy=0
 
     read_io_snapshot
     current=$IO_SNAPSHOT
@@ -313,12 +314,16 @@ get_io_busy() {
     read -r -a cts <<< "$current"
 
     n=$(( ${#cts[@]} / 2 ))
-    if (( ${#pts[@]} == ${#cts[@]} && n > 0 )); then
+    if (( n > 0 )); then
         for ((i=0; i<n; i++)); do
-            pc=${cts[i*2+1]}
-            pd=${pts[i*2+1]}
-            (( pc < pd )) && continue
-            busy=$(( pc - pd ))
+            name=${cts[i*2]}
+            pkey=-1
+            for ((i2=0; i2 < ${#pts[@]}/2; i2++)); do
+                [[ ${pts[i2*2]} == "$name" ]] && pkey=${pts[i2*2+1]} && break
+            done
+            (( pkey < 0 )) && continue
+            (( cts[i*2+1] < pkey )) && continue
+            busy=$(( cts[i*2+1] - pkey ))
             (( busy > max_busy )) && max_busy=$busy
         done
     fi
@@ -1160,6 +1165,9 @@ monitor_and_adjust() {
         fi
 
         (( target_tdp > ceiling )) && target_tdp=$ceiling
+
+        # Round down to the nearest watt (17 455 -> 17 000)
+        target_tdp=$(( target_tdp / STEP_TDP * STEP_TDP ))
         (( target_tdp < MIN_TDP )) && target_tdp=$MIN_TDP
 
         # Up: jump straight to target. Down: at most 2W per write.
