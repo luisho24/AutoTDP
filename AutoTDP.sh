@@ -948,6 +948,8 @@ monitor_and_adjust() {
     local -a gpu_samples=()
     local target_tdp
 
+    local low_streak=0
+
     read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
 
     set_tdp "$ACTIVE_DEFAULT_TDP"
@@ -1028,14 +1030,31 @@ monitor_and_adjust() {
         # --- The whole controller: five zones on one number ---
         if (( load >= LOAD_MAX )); then
             target_tdp=$ceiling
+            low_streak=0
         elif (( load >= LOAD_UP )); then
             target_tdp=$(( current_tdp + 2 * STEP_TDP ))
+            low_streak=0
         elif (( load >= LOAD_DOWN )); then
             target_tdp=$current_tdp
+            low_streak=0
         elif (( load >= 25 )); then
-            target_tdp=$(( current_tdp - STEP_TDP ))
+            # Mildly low: descend only after 4 sustained cycles (~16s)
+            low_streak=$((low_streak + 1))
+            if (( low_streak >= 4 )); then
+                target_tdp=$(( current_tdp - STEP_TDP ))
+                low_streak=0
+            else
+                target_tdp=$current_tdp
+            fi
         else
-            target_tdp=$(( current_tdp - 2 * STEP_TDP ))
+            # Deep idle: drop fast, but confirm with 2 cycles
+            low_streak=$((low_streak + 1))
+            if (( low_streak >= 2 )); then
+                target_tdp=$(( current_tdp - 2 * STEP_TDP ))
+                low_streak=0
+            else
+                target_tdp=$current_tdp
+            fi
         fi
 
         (( target_tdp > ceiling )) && target_tdp=$ceiling
