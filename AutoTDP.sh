@@ -921,37 +921,25 @@ determine_tdp() {
 }
 
 
-# Function to monitor and adjust TDP based on CPU utilization
+# Function to monitor and adjust TDP based on CPU/GPU usage
 monitor_and_adjust() {
     local last_adjustment=0
     local current_tdp=$ACTIVE_DEFAULT_TDP
     local prev_snapshot
-    local cpu_usage
-    local core_breadth
-    local cpu_peak
-    local cpu_signal
-    local sub_cpu
-    local sub_breadth
-    local sub_peak
-    local sub_gpu
-    local gpu_usage
     local cycle=0
-    local new_tdp
-    local limited_tdp
-    local candidate_tdp=$ACTIVE_DEFAULT_TDP
-    local stable_samples=0
     local last_update_check=0
-    local knee_remember=0
-    local was_demand=0
-    local curve_tdp=0
-    local calm_cycles=0
-    local apu_draw=0
-    local burst_cap
-    local demand_streak=0
-    local cpu_comfort_gate=60
-    local cpu_near_gate=80
     local power_state=-1
     local new_power_state
+    local ceiling
+
+    # Zone thresholds on combined load (percent). The whole tuning surface.
+    local LOAD_MAX=75     # at/above: jump straight to the ceiling
+    local LOAD_UP=60      # above: climb 2W; between DOWN and UP: hold
+    local LOAD_DOWN=45    # at/below: descend (2W if very idle)
+
+    local top4=0 cpu_peak=0 cpu_signal=0 gpu_usage=0 load=0
+    local sub_cpu sub_breadth sub_peak sub_gpu
+    local target_tdp
 
     read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
 
@@ -962,22 +950,35 @@ monitor_and_adjust() {
     log "Monitoring and adjusting TDP started"
 
     while true; do
-
-        if is_on_external_power; then new_power_state=1; else new_power_state=0; fi
+        # Power source + ceiling, re-checked every cycle
+        if is_on_external_power; then
+            new_power_state=1
+            ceiling=$ACTIVE_MAX_TDP
+        else
+            new_power_state=0
+            ceiling=$ACTIVE_BATTERY_MAX_TDP
+        fi
         if (( new_power_state != power_state )); then
             if (( new_power_state == 1 )); then
-                log "Power source changed: AC"
+                log "Power source changed: AC (ceiling $((ceiling / 1000))W)"
             else
-                log "Power source changed: battery"
+                log "Power source changed: battery (ceiling $((ceiling / 1000))W)"
             fi
             power_state=$new_power_state
+            # Unplug: never sit above the battery ceiling
+            if (( new_power_state == 0 && current_tdp > ceiling )); then
+                set_tdp "$ceiling"
+                current_tdp=$ceiling
+                last_adjustment=$(date +%s)
+            fi
         fi
+
         cycle=$((cycle + 1))
         if (( cycle % 5 == 1 )); then
             resolve_active_game_profile
         fi
 
-        #check for update
+        # Periodic update check
         if (( $(date +%s) - last_update_check >= UPDATE_CHECK_INTERVAL )); then
             last_update_check=$(date +%s)
             if download_file "$UPDATE_URL" /tmp/autotdp_check.sh 2>/dev/null \
@@ -987,179 +988,55 @@ monitor_and_adjust() {
             rm -f /tmp/autotdp_check.sh
         fi
 
-        # Sub-sample within the interval to catch short CPU bursts
+        # Sub-sample the interval; keep the peak of each metric
+        top4=0
         cpu_peak=0
-        core_breadth=0
         gpu_usage=0
         for (( sub=0; sub < ACTIVE_MONITOR_INTERVAL * 2; sub++ )); do
             sleep 0.5
             read -r sub_cpu sub_breadth sub_peak prev_snapshot < <(get_max_cpu_usage "$prev_snapshot")
-            (( sub_cpu > cpu_peak )) && cpu_peak=$sub_cpu
-            (( sub_breadth > core_breadth )) && core_breadth=$sub_breadth
+            (( sub_cpu > top4 )) && top4=$sub_cpu
+            (( sub_peak > cpu_peak )) && cpu_peak=$sub_peak
             sub_gpu=$(get_max_gpu_usage)
             (( sub_gpu > gpu_usage )) && gpu_usage=$sub_gpu
         done
 
-        cpu_usage=$cpu_peak
+        # CPU signal: average (4 busiest cores) blended with single-core peak
+        cpu_signal=$(( (top4 + cpu_peak) / 2 ))
+        if (( gpu_usage > cpu_signal )); then
+            load=$gpu_usage
+        else
+            load=$cpu_signal
+        fi
 
-        log "Current CPU usage: ${cpu_usage}% | GPU usage: ${gpu_usage}% | cores>=40%: ${core_breadth}"
+        log "CPU: ${cpu_signal}% (avg ${top4}/peak ${cpu_peak}) | GPU: ${gpu_usage}% | load: ${load}% | TDP: $((current_tdp / 1000))W"
 
-        cpu_signal=$cpu_peak
-
+        # Re-assert limits occasionally in case the EC resets them
         if (( $(date +%s) - last_adjustment > 300 )); then
             set_tdp "$current_tdp"
             last_adjustment=$(date +%s)
         fi
 
-        new_tdp=$(determine_tdp "$cpu_signal" "$gpu_usage")
-        limited_tdp=$new_tdp
-
-        # Burst cap: narrow loads (bursts / single-thread) top out at 75% of the
-        # ceiling; full TDP is reserved for broad multi-core demand.
-        if (( core_breadth < 3 )); then
-            if is_on_external_power; then
-                burst_cap=$ACTIVE_MAX_TDP
-            else
-                burst_cap=$ACTIVE_BATTERY_MAX_TDP
-            fi
-            burst_cap=$(( (burst_cap * 75 / 100 / STEP_TDP) * STEP_TDP ))
-            if (( burst_cap < MIN_TDP )); then
-                burst_cap=$MIN_TDP
-            fi
-            if (( limited_tdp > burst_cap )); then
-                limited_tdp=$burst_cap
-            fi
-        fi
-
-        # --- Comfort controller: hold the knee, probe down when comfortable ---
-        apu_draw=$(get_apu_power_w || echo 0)
-        curve_tdp=$limited_tdp   # the curve + burst-cap answer, saved
-
-        # --- Multicore-aware gates: busiest-core % underreads many-thread loads,
-        # so tighten the CPU thresholds as more cores go busy. GPU gates stay fixed.
-        cpu_comfort_gate=$(( 60 - (core_breadth - 1) * 5 ))
-        (( cpu_comfort_gate < 40 )) && cpu_comfort_gate=40
-        cpu_near_gate=$(( 80 - (core_breadth - 3) * 5 ))
-        (( cpu_near_gate > 80 )) && cpu_near_gate=80
-        (( cpu_near_gate < 65 )) && cpu_near_gate=65
-
-        if (( cpu_signal >= 85 || gpu_usage >= 85 )); then
-            demand_streak=$((demand_streak + 1))
-            calm_cycles=0
-            if (( demand_streak >= 2 )); then
-                # Sustained demand: curve's answer (limited_tdp already holds it)
-                if (( was_demand == 0 )); then
-                    knee_remember=$(( current_tdp + STEP_TDP ))
-                    was_demand=1
-                fi
-            else
-                # First cycle: probe with one step, like near-demand
-                limited_tdp=$(( current_tdp + STEP_TDP ))
-                if (( limited_tdp > curve_tdp )); then
-                    limited_tdp=$curve_tdp
-                fi
-            fi
-        elif (( cpu_signal >= cpu_near_gate || gpu_usage >= 80 )); then
-            # Near-demand: climb one step toward the curve's answer
-            limited_tdp=$(( current_tdp + STEP_TDP ))
-            if (( limited_tdp > curve_tdp )); then
-                limited_tdp=$curve_tdp
-            fi
-            was_demand=0
-            demand_streak=0
-        elif (( cpu_signal < cpu_comfort_gate && gpu_usage < 75 )); then
-            # Comfortable: probe downward from where we are
-            calm_cycles=$((calm_cycles + 1))
-            if (( knee_remember > 0 && current_tdp > knee_remember )); then
-                # Post-loading: redescend quickly to the last known-good level
-                if (( calm_cycles >= 2 )); then
-                    limited_tdp=$(( current_tdp - STEP_TDP ))
-                    calm_cycles=0
-                else
-                    limited_tdp=$current_tdp
-                fi
-            elif (( calm_cycles >= 10 )); then
-                # Careful probing below the known-good level
-                limited_tdp=$(( current_tdp - STEP_TDP ))
-                if (( limited_tdp < MIN_TDP )); then
-                    limited_tdp=$MIN_TDP
-                fi
-                calm_cycles=0
-                log "Comfort decay: usage ${cpu_signal}/${gpu_usage}, draw ${apu_draw}W, probing lower"
-            else
-                limited_tdp=$current_tdp
-            fi
-            was_demand=0
-            demand_streak=0
+        # --- The whole controller: five zones on one number ---
+        if (( load >= LOAD_MAX )); then
+            target_tdp=$ceiling
+        elif (( load >= LOAD_UP )); then
+            target_tdp=$(( current_tdp + 2 * STEP_TDP ))
+        elif (( load >= LOAD_DOWN )); then
+            target_tdp=$current_tdp
+        elif (( load >= 25 )); then
+            target_tdp=$(( current_tdp - STEP_TDP ))
         else
-            # Deadband (60-80): this is the knee. HOLD the current level;
-            # the curve does not get to reinterpret moderate usage as demand.
-            limited_tdp=$current_tdp
-            was_demand=0
-            demand_streak=0
+            target_tdp=$(( current_tdp - 2 * STEP_TDP ))
         fi
 
-        # Deep idle (game closed): let the curve pull down at ramp speed
-        if (( cpu_signal < 25 && gpu_usage < 25 && curve_tdp < limited_tdp )); then
-            limited_tdp=$curve_tdp
-        fi
+        (( target_tdp > ceiling )) && target_tdp=$ceiling
+        (( target_tdp < MIN_TDP )) && target_tdp=$MIN_TDP
 
-        if is_on_external_power; then
-            (( limited_tdp > ACTIVE_MAX_TDP )) && limited_tdp=$ACTIVE_MAX_TDP
-        else
-            (( limited_tdp > ACTIVE_BATTERY_MAX_TDP )) && limited_tdp=$ACTIVE_BATTERY_MAX_TDP
-        fi
-
-        if (( limited_tdp < MIN_TDP )); then
-            limited_tdp=$MIN_TDP
-        fi
-
-        if [[ $limited_tdp == "$current_tdp" ]]; then
-            candidate_tdp=$limited_tdp
-            stable_samples=0
-            continue
-        fi
-
-        if [[ $limited_tdp == "$candidate_tdp" ]]; then
-            stable_samples=$((stable_samples + 1))
-        else
-            candidate_tdp=$limited_tdp
-            if (( candidate_tdp > current_tdp )); then
-                stable_samples=$ACTIVE_STABLE_SAMPLE_COUNT
-            else
-                stable_samples=1
-            fi
-        fi
-
-        if (( stable_samples < ACTIVE_STABLE_SAMPLE_COUNT )); then
-            log "Candidate TDP $candidate_tdp waiting for stability ($stable_samples/$ACTIVE_STABLE_SAMPLE_COUNT)"
-            continue
-        fi
-
-        # Down-ramp rate limit: descend at most 2W per adjustment
-        if (( candidate_tdp < current_tdp )); then
-            local down_step=2
-            is_on_external_power || down_step=1
-            if ! is_on_external_power && (( current_tdp > ACTIVE_BATTERY_MAX_TDP )); then
-                down_step=$(( (current_tdp - candidate_tdp) / STEP_TDP ))
-                (( down_step < 1 )) && down_step=1
-            fi
-            if (( current_tdp - candidate_tdp > down_step * STEP_TDP )); then
-                candidate_tdp=$(( current_tdp - down_step * STEP_TDP ))
-            fi
-        fi
-
-        # Narrow loads may only climb 2W per adjustment; broad loads can jump freely
-        if (( candidate_tdp > current_tdp && core_breadth < 3 )); then
-            if (( candidate_tdp - current_tdp > 2 * STEP_TDP )); then
-                candidate_tdp=$(( current_tdp + 2 * STEP_TDP ))
-            fi
-        fi
-
-        if (( $(($(date +%s) - last_adjustment)) >= ACTIVE_RYZENADJ_DELAY )); then
-            log "Adjusting TDP from $current_tdp to $candidate_tdp"
-            set_tdp "$candidate_tdp"
-            current_tdp=$candidate_tdp
+        if (( target_tdp != current_tdp && $(($(date +%s) - last_adjustment)) >= ACTIVE_RYZENADJ_DELAY )); then
+            log "Adjusting TDP from $current_tdp to $target_tdp (load ${load}%)"
+            set_tdp "$target_tdp"
+            current_tdp=$target_tdp
             last_adjustment=$(date +%s)
         fi
     done
