@@ -950,6 +950,8 @@ monitor_and_adjust() {
     local demand_streak=0
     local cpu_comfort_gate=60
     local cpu_near_gate=80
+    local power_state=-1
+    local new_power_state
 
     read -r _ _ _ prev_snapshot < <(get_max_cpu_usage "")
 
@@ -960,6 +962,16 @@ monitor_and_adjust() {
     log "Monitoring and adjusting TDP started"
 
     while true; do
+
+        if is_on_external_power; then new_power_state=1; else new_power_state=0; fi
+        if (( new_power_state != power_state )); then
+            if (( new_power_state == 1 )); then
+                log "Power source changed: AC"
+            else
+                log "Power source changed: battery"
+            fi
+            power_state=$new_power_state
+        fi
         cycle=$((cycle + 1))
         if (( cycle % 5 == 1 )); then
             resolve_active_game_profile
@@ -1128,6 +1140,10 @@ monitor_and_adjust() {
         if (( candidate_tdp < current_tdp )); then
             local down_step=2
             is_on_external_power || down_step=1
+            if ! is_on_external_power && (( current_tdp > ACTIVE_BATTERY_MAX_TDP )); then
+                down_step=$(( (current_tdp - candidate_tdp) / STEP_TDP ))
+                (( down_step < 1 )) && down_step=1
+            fi
             if (( current_tdp - candidate_tdp > down_step * STEP_TDP )); then
                 candidate_tdp=$(( current_tdp - down_step * STEP_TDP ))
             fi
