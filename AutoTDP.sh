@@ -1046,8 +1046,8 @@ monitor_and_adjust() {
     prev_snapshot=$CUR_SNAPSHOT
 
     read_io_snapshot
-    prev_io=$IO_SNAPSHOT_PREV
-
+    prev_io=$IO_SNAPSHOT
+    
     set_tdp "$ACTIVE_DEFAULT_TDP"
     current_tdp=$ACTIVE_DEFAULT_TDP
     last_adjustment=$EPOCHSECONDS
