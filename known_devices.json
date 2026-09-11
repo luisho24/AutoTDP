@@ -149,7 +149,7 @@
       "supported": true,
       "notes": "Higher ceiling profile for Ryzen Z1 Extreme handhelds.",
       "config": {
-        "MIN_TDP": 6000,
+        "MIN_TDP": 8000,
         "DEFAULT_TDP": 15000,
         "MAX_CPU_TDP": 25000,
         "STEP_TDP": 1000,
