@@ -939,7 +939,7 @@ monitor_and_adjust() {
 
     # Zone thresholds on combined load (percent). The whole tuning surface.
     local LOAD_MAX=75     # at/above: jump straight to the ceiling
-    local LOAD_UP=60      # above: climb 2W; between DOWN and UP: hold
+    local LOAD_UP=50      # above: climb 2W; between DOWN and UP: hold
     local LOAD_DOWN=45    # at/below: descend (2W if very idle)
 
     local cpu_signal=0 gpu_usage=0 load=0 sig=0 max_sig=0
