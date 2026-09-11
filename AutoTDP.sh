@@ -1038,8 +1038,8 @@ monitor_and_adjust() {
     local -a sig_samples=()
     local -a gpu_samples=()
 
-    local IO_SPIKE_MS=250    # device busy >= 250ms of a 500ms sample = loading
-    local io_busy=0
+    local IO_BURST_PCT=60    # device busy >= 60% of wall time = loading burst
+    local io_pct=0
     local prev_io=""
 
     get_max_cpu_usage ""
@@ -1047,7 +1047,7 @@ monitor_and_adjust() {
 
     read_io_snapshot
     prev_io=$IO_SNAPSHOT
-    
+
     set_tdp "$ACTIVE_DEFAULT_TDP"
     current_tdp=$ACTIVE_DEFAULT_TDP
     last_adjustment=$EPOCHSECONDS
@@ -1108,7 +1108,7 @@ monitor_and_adjust() {
             gpu_samples+=( "$MAX_GPU" )
             get_io_busy "$prev_io"
             prev_io=$IO_SNAPSHOT_PREV
-            (( io_busy < IO_BUSY )) && io_busy=$IO_BUSY
+            io_pct=$(( IO_BUSY * 100 / (ACTIVE_MONITOR_INTERVAL * 1000) ))
         done
 
         trimmed_mean "${sig_samples[@]}"; cpu_signal=$TM_RESULT
@@ -1129,11 +1129,11 @@ monitor_and_adjust() {
         fi
 
         # Spike activity refreshes the bonus window
-        if (( max_sig >= SPIKE_THRESHOLD || io_busy >= IO_SPIKE_MS )); then
+        if (( max_sig >= SPIKE_THRESHOLD || io_pct >= IO_BURST_PCT )); then
             last_spike=$EPOCHSECONDS
         fi
 
-        log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | io: ${io_busy}ms | load: ${load}% | TDP: $((current_tdp / 1000))W"
+        log "CPU: ${cpu_signal}% (spike ${max_sig}%) | GPU: ${gpu_usage}% | io: ${io_pct}% | load: ${load}% | TDP: $((current_tdp / 1000))W"
 
         # Re-assert limits occasionally in case the EC resets them
         if (( EPOCHSECONDS - last_adjustment > 300 )); then
@@ -1141,8 +1141,12 @@ monitor_and_adjust() {
             last_adjustment=$EPOCHSECONDS
         fi
 
-        # --- Proportional target: 90% load = ceiling, 45% = halfway, linear ---
-        if (( smooth_load >= FULL_SCALE )); then
+        # 90% load = ceiling, 45% = halfway, linear
+        # --- Proportional target ---
+        # Below 25% load (and GPU idle): the minimum exists precisely for this.
+        if (( smooth_load < 25 )); then
+            base_target=$MIN_TDP
+        elif (( smooth_load >= FULL_SCALE )); then
             base_target=$ceiling
         else
             base_target=$(( MIN_TDP + (ceiling - MIN_TDP) * smooth_load / FULL_SCALE ))
